@@ -1,0 +1,18 @@
+# 배포 불필요 데이터 (용량 큼)
+raw_data/
+structured_data/
+PPT/
+
+# Python 캐시
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+
+# 로컬 환경
+.env
+*.log
+
+# Streamlit secrets (API 키 포함 - 절대 커밋 금지)
+.streamlit/secrets.toml
