@@ -69,7 +69,7 @@ Step 1          Step 2         Step 3         Step 4         Step 5       Step 6
 | 벡터 DB | ChromaDB — `module_db/` (모듈 단위, 22MB) |
 | UI | Streamlit |
 | 문서 변환 | python-docx (마크다운 → .docx) |
-| API Key | `REDACTED_API_KEY` |
+| API Key | `` |
 
 ---
 
