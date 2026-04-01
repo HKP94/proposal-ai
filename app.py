@@ -21,6 +21,10 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MODULE_DB_PATH = os.path.join(SCRIPT_DIR, "module_db")
 LEGACY_DB_PATH = os.path.join(SCRIPT_DIR, "chroma_db")  # 구버전 폴백용
 
+if not API_KEY:
+    st.error("❌ GEMINI_API_KEY가 설정되지 않았습니다. Streamlit Cloud → Settings → Secrets에 추가하세요.")
+    st.stop()
+
 client_genai = genai.Client(api_key=API_KEY)
 MODEL_NAME = "gemini-3.1-flash-lite-preview"
 
@@ -1224,9 +1228,10 @@ if current_step >= 2 and st.session_state.needs_json:
                         st.session_state.retrieved_modules_json = r_modules_json
                         st.session_state.grouped = grouped
                         st.session_state.workflow_step = 3
+                        st.rerun()
                     except Exception as e:
                         st.error(f"모듈 검색 오류: {e}")
-                st.rerun()
+                        st.stop()
 
         with col_back:
             if st.button("✏️ 다시 입력", use_container_width=True, key="step2_back"):
