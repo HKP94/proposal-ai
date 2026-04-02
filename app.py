@@ -721,7 +721,7 @@ def assemble_curriculum(needs_json, grouped_modules, duration, retrieved_modules
 ## 📋 과정 개요
 * **과정명:** (창의적이고 전문적인 과정명)
 * **교육 대상:** {needs_json.get('target')}
-* **교육 목적:** (1~2문장)
+* **교육 목적:** (개괄식으로 2개 작성)
 * **교육 시간:** {duration} ({total_h}H)
 * **교육 방식:** (강의형/실습형/워크샵형 중 선택)
 
@@ -1058,7 +1058,7 @@ with st.sidebar:
         help="생성된 제안서에서 [고객사명]을 자동으로 치환합니다."
     )
     industry = st.selectbox("산업군", ["전산업", "유통", "금융", "제조", "IT", "건설", "공공", "의료/제약", "교육", "통신/미디어", "기타"])
-    target   = st.selectbox("교육 대상", ["팀장/리더급", "신입사원", "중간관리자", "임원", "전직급", "기타"])
+    target   = st.selectbox("교육 대상", ["팀장/리더급", "신입사원", "중간관리자", "임원", "전직급", "싱무진" , "기타"])
     duration = st.selectbox("교육 기간", ["4H (반일)", "8H (1일)", "16H (2일)", "24H (3일)"])
 
     st.divider()
