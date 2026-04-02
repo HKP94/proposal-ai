@@ -923,7 +923,8 @@ def review_proposal(proposal_text: str, needs_json: dict) -> dict:
 
 
 def improve_proposal(original_proposal: str, review_result: dict,
-                     needs_json: dict, grouped_modules: dict, duration: str) -> str:
+                     needs_json: dict, grouped_modules: dict, duration: str,
+                     user_opinion: str = "") -> str:
     """검수 피드백을 반영해 제안서 재생성"""
     framework = DURATION_FRAMEWORK.get(duration, DURATION_FRAMEWORK["8H (1일)"])
     total_h = framework["total_h"]
@@ -932,17 +933,32 @@ def improve_proposal(original_proposal: str, review_result: dict,
     issues = "\n".join([f"- {i}" for i in review_result.get("개선_필요", [])])
     critical = "\n".join([f"- {i}" for i in review_result.get("즉시_수정_필요", [])])
 
-    prompt = f"""당신은 10년 경력의 시니어 HRD 컨설턴트입니다.
-아래 1차 제안서를 검수자의 피드백을 반영하여 완성도 높게 개선하세요.
+    if user_opinion.strip():
+        feedback_section = f"""## 사용자 직접 지시 (최우선 반영)
+{user_opinion.strip()}
 
-## 검수자 피드백 (반드시 모두 반영)
+## 검수자 피드백 (위 사용자 지시와 충돌하지 않는 범위에서 반영)
 {improvement_prompt}
 
 ### 개선 필요 사항
 {issues}
 
 ### 즉시 수정 필수
-{critical}
+{critical}"""
+    else:
+        feedback_section = f"""## 검수자 피드백 (반드시 모두 반영)
+{improvement_prompt}
+
+### 개선 필요 사항
+{issues}
+
+### 즉시 수정 필수
+{critical}"""
+
+    prompt = f"""당신은 10년 경력의 시니어 HRD 컨설턴트입니다.
+아래 1차 제안서를 피드백을 반영하여 완성도 높게 개선하세요.
+
+{feedback_section}
 
 ## 고객 니즈
 - 대상: {needs_json.get('target')} | 산업: {needs_json.get('industry')} | {total_h}H
@@ -1589,6 +1605,13 @@ if current_step >= 4 and st.session_state.proposal:
         st.divider()
         st.subheader("6️⃣ 피드백 반영 재생성")
 
+        user_opinion = st.text_area(
+            "✏️ 추가 의견 (선택)",
+            placeholder="예: 3모듈의 실습 시간을 늘려주세요. 사례 연구를 금융권 중심으로 바꿔주세요.\n비워두면 위 검수자 의견 중심으로 개선합니다.",
+            height=100,
+            key="user_opinion_input"
+        )
+
         if st.button(
             "🔄 검수 피드백 반영하여 제안서 개선",
             use_container_width=True,
@@ -1601,7 +1624,8 @@ if current_step >= 4 and st.session_state.proposal:
                     review,
                     nj,
                     st.session_state.grouped,
-                    duration
+                    duration,
+                    user_opinion=user_opinion
                 )
             # [P2] HTML 태그 정규화 클렌징
             improved = re.sub(r'<br\s*/?>', '\n- ', improved)   # <br> → 리스트 항목 형식
