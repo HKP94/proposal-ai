@@ -399,9 +399,11 @@ def search_modules_detailed(collection, needs_json, db_type):
             f"{target} {' '.join(keywords)} {pain} {level}",
         ]
 
-        # 3개 임베딩 병렬 호출
-        with ThreadPoolExecutor(max_workers=3) as executor:
-            embeddings = list(executor.map(_embed, queries))
+        # 3개 임베딩 순차 호출 (0.5s 딜레이로 Burst 제한 방지)
+        embeddings = []
+        for q in queries:
+            embeddings.append(_embed(q))
+            time.sleep(0.5)
 
         # 각 쿼리로 ChromaDB 검색 후 RRF 점수 계산
         rrf_scores   = {}  # id → rrf_score (랭킹 정렬용)
@@ -858,6 +860,7 @@ def assemble_curriculum(needs_json, grouped_modules, duration, retrieved_modules
             failures_text = " | ".join(quality_result["failures"])
             print(f"\n🔄 [QA 재시도 발생: {quality_attempt+1}/{MAX_QUALITY_ATTEMPTS}]")
             print(f"❌ 실패 사유: {failures_text}")
+            time.sleep(3)  # RPM 버스트 방지: 재시도 전 3초 대기
             # 프롬프트 끝에 실패 원인을 추가하여 재시도
             prompt = prompt + f"""
 
