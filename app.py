@@ -354,12 +354,22 @@ def analyze_needs(query, industry, target, duration):
 # ============ Step 2: 모듈 검색 ============
 # ============ [P0-B] Hard-Binding RAG Context ============
 def _embed(text: str) -> list:
-    """단일 텍스트 임베딩 생성"""
-    result = client_genai.models.embed_content(
-        model=EMBED_MODEL_NAME,
-        contents=text
-    )
-    return result.embeddings[0].values
+    """단일 텍스트 임베딩 생성 (429 rate limit 시 자동 재시도)"""
+    for attempt in range(4):
+        try:
+            result = client_genai.models.embed_content(
+                model=EMBED_MODEL_NAME,
+                contents=text
+            )
+            return result.embeddings[0].values
+        except Exception as e:
+            if "429" in str(e) and attempt < 3:
+                wait = 20 * (attempt + 1)
+                print(f"[임베딩 rate limit] {wait}초 후 재시도 (시도 {attempt+1}/4)")
+                time.sleep(wait)
+            else:
+                raise e
+    raise Exception("임베딩 생성 실패: 최대 재시도 초과")
 
 
 def search_modules_detailed(collection, needs_json, db_type):
@@ -387,6 +397,7 @@ def search_modules_detailed(collection, needs_json, db_type):
         merged = {}  # ChromaDB id → {meta, similarity}
         for query_text in queries:
             embedding = _embed(query_text)
+            time.sleep(1)  # 연속 호출 간 rate limit 방지
             raw = collection.query(
                 query_embeddings=[embedding],
                 n_results=collection.count()
