@@ -27,6 +27,7 @@ if not API_KEY:
 
 client_genai = genai.Client(api_key=API_KEY)
 MODEL_NAME = "gemini-3.1-flash-lite-preview"
+EMBED_MODEL_NAME = "gemini-embedding-001"  # TODO: text-embedding-004 으로 교체 시 DB 재구축 필요 (CLAUDE.md 참고)
 
 # ============ [P0-A] Interactive Needs Gathering ============
 # 필수 정보 체크리스트
@@ -352,96 +353,110 @@ def analyze_needs(query, industry, target, duration):
 
 # ============ Step 2: 모듈 검색 ============
 # ============ [P0-B] Hard-Binding RAG Context ============
+def _embed(text: str) -> list:
+    """단일 텍스트 임베딩 생성"""
+    result = client_genai.models.embed_content(
+        model=EMBED_MODEL_NAME,
+        contents=text
+    )
+    return result.embeddings[0].values
+
+
 def search_modules_detailed(collection, needs_json, db_type):
     """
-    [P0-B] 검색 결과를 상세하게 JSON으로 구조화하여 Gemini 프롬프트에 주입할 수 있는 형태로 반환
-    기존의 search_modules()와 동일한 검색 과정이지만, 결과를 상세 JSON으로 포장
+    멀티쿼리 검색: 니즈를 3가지 관점으로 분해해 각각 검색 후 병합, 상위 20개 반환
+    - 쿼리 1: 핵심 키워드 중심
+    - 쿼리 2: 문제점 + 기대 행동 변화 중심
+    - 쿼리 3: 전체 맥락 통합
     """
-    keywords = needs_json.get("core_keywords", [])
-    search_text = " ".join(keywords) + " " + needs_json.get("pain_point", "")
+    keywords  = needs_json.get("core_keywords", [])
+    pain      = needs_json.get("pain_point", "")
+    behavior  = needs_json.get("expected_behavior", "")
+    level     = needs_json.get("learning_level", "")
+    target    = needs_json.get("target", "")
 
-    # 임베딩 생성
-    result = client_genai.models.embed_content(
-        model="gemini-embedding-001",
-        contents=search_text
-    )
-    embedding = result.embeddings[0].values
-
-    # ChromaDB 검색
-    results = collection.query(
-        query_embeddings=[embedding],
-        n_results=collection.count()
-    )
-
-    # [P0-B] 검색 결과를 상세하게 구조화
     retrieved_modules = []
 
     if db_type == "module":
-        metas = results["metadatas"][0]
-        distances = results["distances"][0]
+        queries = [
+            " ".join(keywords),
+            f"{pain} {behavior}",
+            f"{target} {' '.join(keywords)} {pain} {level}",
+        ]
 
-        for idx, (meta, dist) in enumerate(zip(metas, distances)):
-            similarity = round((1 - dist) * 100, 1)
+        merged = {}  # ChromaDB id → {meta, similarity}
+        for query_text in queries:
+            embedding = _embed(query_text)
+            raw = collection.query(
+                query_embeddings=[embedding],
+                n_results=collection.count()
+            )
+            for meta, dist, doc_id in zip(
+                raw["metadatas"][0],
+                raw["distances"][0],
+                raw["ids"][0]
+            ):
+                similarity = round((1 - dist) * 100, 1)
+                if doc_id not in merged or merged[doc_id]["similarity"] < similarity:
+                    merged[doc_id] = {"meta": meta, "similarity": similarity}
 
-            # 핵심: 모듈의 세부 내용을 모두 포함
-            module_detail = {
+        # 유사도 내림차순 정렬, 상위 20개
+        top_items = sorted(merged.values(), key=lambda x: x["similarity"], reverse=True)[:20]
+
+        for idx, item in enumerate(top_items):
+            meta = item["meta"]
+            retrieved_modules.append({
                 "rank": idx + 1,
-                "similarity_percent": similarity,
-                "모듈명": meta.get("모듈명", ""),
-                "과정명": meta.get("과정명", ""),
+                "similarity_percent": item["similarity"],
+                "모듈명":       meta.get("모듈명", ""),
+                "과정명":       meta.get("과정명", ""),
                 "세부주제목록": meta.get("세부주제목록", ""),
-                "세부내용요약": meta.get("세부내용요약", ""),  # ← 핵심 콘텐츠
-                "권장시간": meta.get("권장시간", ""),
-                "교육방식": meta.get("교육방식", ""),
-                "모듈성격": meta.get("모듈성격", "core"),
-            }
-            retrieved_modules.append(module_detail)
-    else:
-        # 구버전 폴백
-        metas = results["metadatas"][0]
-        distances = results["distances"][0]
-        for idx, (meta, dist) in enumerate(zip(metas, distances)):
-            similarity = round((1 - dist) * 100, 1)
-            module_detail = {
-                "rank": idx + 1,
-                "similarity_percent": similarity,
-                "과정명": meta.get("과정명", ""),
                 "세부내용요약": meta.get("세부내용요약", ""),
-                "권장시간": meta.get("권장시간", ""),
-            }
-            retrieved_modules.append(module_detail)
+                "권장시간":     meta.get("권장시간", ""),
+                "교육방식":     meta.get("교육방식", ""),
+                "모듈성격":     meta.get("모듈성격", "core"),
+            })
 
-    # JSON 형식으로 정렬하여 반환
+    else:
+        # 구버전 폴백: 단일 쿼리
+        embedding = _embed(" ".join(keywords) + " " + pain)
+        raw = collection.query(
+            query_embeddings=[embedding],
+            n_results=min(20, collection.count())
+        )
+        for idx, (meta, dist) in enumerate(zip(raw["metadatas"][0], raw["distances"][0])):
+            retrieved_modules.append({
+                "rank": idx + 1,
+                "similarity_percent": round((1 - dist) * 100, 1),
+                "과정명":       meta.get("과정명", ""),
+                "세부내용요약": meta.get("세부내용요약", ""),
+                "권장시간":     meta.get("권장시간", ""),
+            })
+
     retrieved_json = json.dumps(retrieved_modules, ensure_ascii=False, indent=2)
-    return results, retrieved_modules, retrieved_json
+    return retrieved_modules, retrieved_json
 
 
-def group_modules_by_type(search_results, db_type):
+def group_modules_by_type(retrieved_modules, db_type):
     """
-    검색된 모듈을 성격별로 그룹핑: intro / core / apply
+    retrieved_modules 리스트를 모듈성격별로 그룹핑: intro / core / apply
     """
     groups = {"intro": [], "core": [], "apply": []}
-
     if db_type == "module":
-        metas = search_results["metadatas"][0]
-        docs = search_results["documents"][0]
-        distances = search_results["distances"][0]
-
-        for meta, doc, dist in zip(metas, docs, distances):
-            module_type = meta.get("모듈성격", "core")
-            similarity = round((1 - dist) * 100, 1)
+        for mod in retrieved_modules:
+            module_type = mod.get("모듈성격", "core")
+            if module_type not in groups:
+                module_type = "core"
             groups[module_type].append({
-                "meta": meta,
-                "similarity": similarity,
+                "meta": mod,
+                "similarity": mod.get("similarity_percent", 0),
             })
     else:
-        # 구버전 폴백
-        metas = search_results["metadatas"][0]
-        distances = search_results["distances"][0]
-        for meta, dist in zip(metas, distances):
-            similarity = round((1 - dist) * 100, 1)
-            groups["core"].append({"meta": meta, "similarity": similarity})
-
+        for mod in retrieved_modules:
+            groups["core"].append({
+                "meta": mod,
+                "similarity": mod.get("similarity_percent", 0),
+            })
     return groups
 
 
@@ -1230,10 +1245,10 @@ if current_step >= 2 and st.session_state.needs_json:
                 collection, db_type = load_module_db()
                 with st.spinner("📚 관련 모듈 검색 중..."):
                     try:
-                        s_results, r_modules, r_modules_json = search_modules_detailed(
+                        r_modules, r_modules_json = search_modules_detailed(
                             collection, nj, db_type
                         )
-                        grouped = group_modules_by_type(s_results, db_type)
+                        grouped = group_modules_by_type(r_modules, db_type)
                         st.session_state.retrieved_modules = r_modules
                         st.session_state.retrieved_modules_json = r_modules_json
                         st.session_state.grouped = grouped
