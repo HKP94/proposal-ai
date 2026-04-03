@@ -67,7 +67,7 @@ def clean_course_name(filename):
     noise_patterns = [
         r'표준제안서\s*★?',
         r'표준\s*제안서',
-        r'\[.*?\]',                          # 대괄호 내용
+        r'[\[\]]',                           # 대괄호 기호만 제거 (내용 보존)
         r'\b\d{6,8}\b',                      # 날짜 (YYMMDD ~ YYYYMMDD)
         r'\bv\d+(\.\d+)?\b',                 # 버전: v1, v2, v1.2
         r'\b(최종|픽스|fix|final|수정|확인)\b', # 버전 텍스트
@@ -123,8 +123,9 @@ def classify_modules_batch(module_list):
                 rotate_key()
                 time.sleep(5)
             else:
-                print(f"    ⚠️ 분류 오류 ({e}), 기본값(core) 사용")
-                return {str(i): "core" for i in range(len(module_list))}
+                print(f"    ⚠️ 분류 오류 (시도 {attempt+1}): {e}, 재시도 중...")
+                time.sleep(2)
+    print(f"    ❌ 최대 재시도 초과, 기본값(core) 사용")
     return {str(i): "core" for i in range(len(module_list))}
 
 
@@ -277,7 +278,7 @@ for global_idx, item in enumerate(test_modules):
             "모듈순서":     item["mod_idx"],
             "총모듈수":     item["total_mods"],
             "세부주제목록": " | ".join(topic_subjects[:6]),
-            "세부내용요약": " ".join(topic_contents)[:500],
+            "세부내용요약": " ".join(topic_contents),
         }]
     )
 
