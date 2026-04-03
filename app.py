@@ -36,25 +36,6 @@ DURATION_FRAMEWORK = {
     "24H (3일)":  {"도입": 2, "핵심": 8, "실습": 10, "마무리": 4, "total_h": 24},
 }
 
-# [P1-1] 활동별 소요 시간 데이터셋 (CoT Time Validator용)
-ACTIVITY_TIME_ESTIMATE = {
-    "강의": 1.0,            # 1분/분량
-    "진단": 5,              # 진단 활동 5분
-    "진단지": 5,
-    "롤플레잉": 10,         # 롤플레잉 1회 10분
-    "페어": 10,             # 페어 활동
-    "토의": 8,              # 팀/전체 토의
-    "실습": 12,             # 실습 활동 12분
-    "사례": 8,              # 사례 분석/공유
-    "케이스": 12,
-    "시뮬레이션": 15,       # 시뮬레이션 15분
-    "피드백": 5,            # 피드백 세션
-    "워크숍": 2.0,          # 워크숍 형식 2분/분량
-    "발표": 8,              # 발표/공유
-    "Q&A": 5,               # 질의응답
-    "마무리": 3,            # 정리/마무리
-}
-
 # ============ [P0-A] Interactive Needs Gathering ============
 # 필수 정보 체크리스트
 REQUIRED_INFO = {
@@ -378,28 +359,6 @@ def analyze_needs(query, industry, target, duration):
 
 
 # ============ Step 2: 모듈 검색 ============
-def search_modules(collection, needs_json, db_type, top_k=20):
-    """
-    구조화된 니즈를 기반으로 ChromaDB에서 관련 모듈 검색
-    """
-    keywords = needs_json.get("core_keywords", [])
-    search_text = " ".join(keywords) + " " + needs_json.get("pain_point", "")
-
-    # 임베딩 생성
-    result = client_genai.models.embed_content(
-        model="gemini-embedding-001",
-        contents=search_text
-    )
-    embedding = result.embeddings[0].values
-
-    # ChromaDB 검색
-    results = collection.query(
-        query_embeddings=[embedding],
-        n_results=min(top_k, collection.count())
-    )
-    return results
-
-
 # ============ [P0-B] Hard-Binding RAG Context ============
 def search_modules_detailed(collection, needs_json, db_type, top_k=8):
     """
@@ -519,7 +478,7 @@ def validate_curriculum_timing(curriculum_text: str, total_hours: int) -> dict:
                 "시간": hours,
                 "분": minutes
             })
-        except:
+        except ValueError:
             pass
 
     # 검증
@@ -937,7 +896,7 @@ def review_proposal(proposal_text: str, needs_json: dict) -> dict:
 
 
 def improve_proposal(original_proposal: str, review_result: dict,
-                     needs_json: dict, grouped_modules: dict, duration: str,
+                     needs_json: dict, duration: str,
                      user_opinion: str = "") -> str:
     """검수 피드백을 반영해 제안서 재생성"""
     framework = DURATION_FRAMEWORK.get(duration, DURATION_FRAMEWORK["8H (1일)"])
@@ -980,7 +939,7 @@ def improve_proposal(original_proposal: str, review_result: dict,
 - 기대 행동 변화: {needs_json.get('expected_behavior')}
 
 ## 1차 제안서 (개선 기준)
-{original_proposal[:3000]}
+{original_proposal}
 
 ---
 위 피드백을 100% 반영하여, 동일한 섹션 구조(과정 개요 → 교육 목표 → 상세 커리큘럼 → 기대 효과)로
@@ -1637,7 +1596,6 @@ if current_step >= 4 and st.session_state.proposal:
                     proposal,
                     review,
                     nj,
-                    st.session_state.grouped,
                     duration,
                     user_opinion=user_opinion
                 )
