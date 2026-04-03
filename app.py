@@ -9,7 +9,6 @@ import os
 import re
 import time
 import io
-from concurrent.futures import ThreadPoolExecutor
 from google import genai
 import chromadb
 from docx import Document
@@ -28,7 +27,6 @@ if not API_KEY:
 
 client_genai = genai.Client(api_key=API_KEY)
 MODEL_NAME = "gemini-3.1-flash-lite-preview"
-EMBED_MODEL_NAME = "gemini-embedding-001"  # TODO: text-embedding-004 으로 교체 시 DB 재구축 필요 (CLAUDE.md 참고)
 
 # ============ [P0-A] Interactive Needs Gathering ============
 # 필수 정보 체크리스트
@@ -354,100 +352,96 @@ def analyze_needs(query, industry, target, duration):
 
 # ============ Step 2: 모듈 검색 ============
 # ============ [P0-B] Hard-Binding RAG Context ============
-def _embed(text: str) -> list:
-    """단일 텍스트 임베딩 생성 (429 rate limit 시 자동 재시도)"""
-    import re as _re
-    for attempt in range(5):
-        try:
-            result = client_genai.models.embed_content(
-                model=EMBED_MODEL_NAME,
-                contents=text
-            )
-            return result.embeddings[0].values
-        except Exception as e:
-            if "429" in str(e) and attempt < 4:
-                # API 응답에서 권장 대기 시간 파싱 (예: "Please retry in 21.15s")
-                m = _re.search(r'retry[^\d]*(\d+(?:\.\d+)?)\s*s', str(e), _re.IGNORECASE)
-                wait = int(float(m.group(1))) + 5 if m else 30 * (attempt + 1)
-                print(f"[임베딩 rate limit] {wait}초 후 재시도 (시도 {attempt+1}/5)")
-                time.sleep(wait)
-            else:
-                raise e
-    raise Exception("임베딩 생성 실패: 최대 재시도 초과")
-
-
 def search_modules_detailed(collection, needs_json, db_type):
     """
-    단일 쿼리 검색 (원래 로직 복원)
-    - 쿼리: core_keywords + pain_point
-    - n_results: 전체 DB 대상 검색
+    [P0-B] 검색 결과를 상세하게 JSON으로 구조화하여 Gemini 프롬프트에 주입할 수 있는 형태로 반환
+    기존의 search_modules()와 동일한 검색 과정이지만, 결과를 상세 JSON으로 포장
     """
     keywords = needs_json.get("core_keywords", [])
     search_text = " ".join(keywords) + " " + needs_json.get("pain_point", "")
 
-    embedding = _embed(search_text)
+    # 임베딩 생성
+    result = client_genai.models.embed_content(
+        model="gemini-embedding-001",
+        contents=search_text
+    )
+    embedding = result.embeddings[0].values
 
+    # ChromaDB 검색
     results = collection.query(
         query_embeddings=[embedding],
         n_results=collection.count()
     )
 
+    # [P0-B] 검색 결과를 상세하게 구조화
     retrieved_modules = []
 
     if db_type == "module":
-        metas     = results["metadatas"][0]
+        metas = results["metadatas"][0]
         distances = results["distances"][0]
 
         for idx, (meta, dist) in enumerate(zip(metas, distances)):
-            retrieved_modules.append({
+            similarity = round((1 - dist) * 100, 1)
+
+            # 핵심: 모듈의 세부 내용을 모두 포함
+            module_detail = {
                 "rank": idx + 1,
-                "similarity_percent": round((1 - dist) * 100, 1),
-                "모듈명":       meta.get("모듈명", ""),
-                "과정명":       meta.get("과정명", ""),
+                "similarity_percent": similarity,
+                "모듈명": meta.get("모듈명", ""),
+                "과정명": meta.get("과정명", ""),
                 "세부주제목록": meta.get("세부주제목록", ""),
-                "세부내용요약": meta.get("세부내용요약", ""),
-                "권장시간":     meta.get("권장시간", ""),
-                "교육방식":     meta.get("교육방식", ""),
-                "모듈성격":     meta.get("모듈성격", "core"),
-            })
-
+                "세부내용요약": meta.get("세부내용요약", ""),  # ← 핵심 콘텐츠
+                "권장시간": meta.get("권장시간", ""),
+                "교육방식": meta.get("교육방식", ""),
+                "모듈성격": meta.get("모듈성격", "core"),
+            }
+            retrieved_modules.append(module_detail)
     else:
-        metas     = results["metadatas"][0]
+        # 구버전 폴백
+        metas = results["metadatas"][0]
         distances = results["distances"][0]
-
         for idx, (meta, dist) in enumerate(zip(metas, distances)):
-            retrieved_modules.append({
+            similarity = round((1 - dist) * 100, 1)
+            module_detail = {
                 "rank": idx + 1,
-                "similarity_percent": round((1 - dist) * 100, 1),
-                "과정명":       meta.get("과정명", ""),
+                "similarity_percent": similarity,
+                "과정명": meta.get("과정명", ""),
                 "세부내용요약": meta.get("세부내용요약", ""),
-                "권장시간":     meta.get("권장시간", ""),
-            })
+                "권장시간": meta.get("권장시간", ""),
+            }
+            retrieved_modules.append(module_detail)
 
+    # JSON 형식으로 정렬하여 반환
     retrieved_json = json.dumps(retrieved_modules, ensure_ascii=False, indent=2)
-    return retrieved_modules, retrieved_json
+    return results, retrieved_modules, retrieved_json
 
 
-def group_modules_by_type(retrieved_modules, db_type):
+def group_modules_by_type(search_results, db_type):
     """
-    retrieved_modules 리스트를 모듈성격별로 그룹핑: intro / core / apply
+    검색된 모듈을 성격별로 그룹핑: intro / core / apply
     """
     groups = {"intro": [], "core": [], "apply": []}
+
     if db_type == "module":
-        for mod in retrieved_modules:
-            module_type = mod.get("모듈성격", "core")
-            if module_type not in groups:
-                module_type = "core"
+        metas = search_results["metadatas"][0]
+        docs = search_results["documents"][0]
+        distances = search_results["distances"][0]
+
+        for meta, doc, dist in zip(metas, docs, distances):
+            module_type = meta.get("모듈성격", "core")
+            similarity = round((1 - dist) * 100, 1)
             groups[module_type].append({
-                "meta": mod,
-                "similarity": mod.get("similarity_percent", 0),
+                "meta": meta,
+                "similarity": similarity,
             })
     else:
-        for mod in retrieved_modules:
-            groups["core"].append({
-                "meta": mod,
-                "similarity": mod.get("similarity_percent", 0),
-            })
+        # 구버전 폴백
+        metas = search_results["metadatas"][0]
+        distances = search_results["distances"][0]
+        for meta, dist in zip(metas, distances):
+            similarity = round((1 - dist) * 100, 1)
+            groups["core"].append({"meta": meta, "similarity": similarity})
+
     return groups
 
 
@@ -787,8 +781,6 @@ def assemble_curriculum(needs_json, grouped_modules, duration, retrieved_modules
     for quality_attempt in range(MAX_QUALITY_ATTEMPTS):
         # API 호출 (Rate-limit 재시도 포함)
         curriculum = None
-        print(f"\n⏱️  [생성 시작] quality_attempt={quality_attempt+1}/{MAX_QUALITY_ATTEMPTS}")
-        _gen_start = time.time()
         for api_attempt in range(3):
             try:
                 response = client_genai.models.generate_content(
@@ -800,12 +792,10 @@ def assemble_curriculum(needs_json, grouped_modules, duration, retrieved_modules
             except Exception as e:
                 if "429" in str(e) and api_attempt < 2:
                     wait = 60 * (api_attempt + 1)
-                    print(f"🚨 [API 429 Rate Limit] 제안서 생성 중 발생! {wait}초 강제 대기...")
                     st.warning(f"⏳ API 제한. {wait}초 후 재시도... ({api_attempt+1}/3)")
                     time.sleep(wait)
                 else:
                     raise e
-        print(f"⏱️  [생성 완료] {time.time() - _gen_start:.1f}초 소요")
 
         if curriculum is None:
             raise Exception("API 호출에 실패했습니다.")
@@ -816,14 +806,12 @@ def assemble_curriculum(needs_json, grouped_modules, duration, retrieved_modules
         quality_result = validate_proposal_quality(curriculum)
 
         if quality_result["passed"]:
-            print(f"✅ [QA 통과] attempt={quality_attempt+1}")
+            # 품질 기준 통과 → 바로 반환
             break
 
         if quality_attempt < MAX_QUALITY_ATTEMPTS - 1:
+            # 품질 기준 미달 → 백그라운드 재생성 (에러 노출 없음)
             failures_text = " | ".join(quality_result["failures"])
-            print(f"\n🔄 [QA 재시도 발생: {quality_attempt+1}/{MAX_QUALITY_ATTEMPTS}]")
-            print(f"❌ 실패 사유: {failures_text}")
-            time.sleep(3)  # RPM 버스트 방지: 재시도 전 3초 대기
             # 프롬프트 끝에 실패 원인을 추가하여 재시도
             prompt = prompt + f"""
 
@@ -893,9 +881,7 @@ def review_proposal(proposal_text: str, needs_json: dict) -> dict:
             return json.loads(response.text)
         except Exception as e:
             if "429" in str(e) and attempt < 2:
-                wait = 60 * (attempt + 1)
-                print(f"🚨 [API 429 Rate Limit] 검수 중 발생! {wait}초 강제 대기...")
-                time.sleep(wait)
+                time.sleep(60 * (attempt + 1))
             else:
                 return {"총점": 0, "개선_지시문": str(e), "제출_가능_여부": "오류"}
 
@@ -969,9 +955,7 @@ def improve_proposal(original_proposal: str, review_result: dict,
             return response.text
         except Exception as e:
             if "429" in str(e) and attempt < 2:
-                wait = 60 * (attempt + 1)
-                print(f"🚨 [API 429 Rate Limit] 제안서 개선 중 발생! {wait}초 강제 대기...")
-                time.sleep(wait)
+                time.sleep(60 * (attempt + 1))
             else:
                 raise e
 
@@ -1014,7 +998,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📋 제안서 AI 어시스턴트 v5.0")
+st.title("📋 제안서 AI 어시스턴트 v3.0")
 st.caption("고객 니즈 수집 → 니즈 확인 → 모듈 선택 → 맞춤 제안서 생성")
 
 # ── session_state 초기화 ──
@@ -1246,10 +1230,10 @@ if current_step >= 2 and st.session_state.needs_json:
                 collection, db_type = load_module_db()
                 with st.spinner("📚 관련 모듈 검색 중..."):
                     try:
-                        r_modules, r_modules_json = search_modules_detailed(
+                        s_results, r_modules, r_modules_json = search_modules_detailed(
                             collection, nj, db_type
                         )
-                        grouped = group_modules_by_type(r_modules, db_type)
+                        grouped = group_modules_by_type(s_results, db_type)
                         st.session_state.retrieved_modules = r_modules
                         st.session_state.retrieved_modules_json = r_modules_json
                         st.session_state.grouped = grouped
@@ -1401,9 +1385,6 @@ if current_step >= 3 and st.session_state.retrieved_modules:
             _prog.progress(15, text="📚 관련 모듈 검색 중...")
             _prog.progress(35, text="✍️ 커리큘럼 조합 중..." + (" (고도화 모드)" if track == "advanced" else ""))
 
-            _total_start = time.time()
-            print(f"\n{'='*55}")
-            print(f"🚀 [제안서 생성 시작] track={track}, duration={duration}H")
             proposal, timing_result = assemble_curriculum(
                 st.session_state.needs_json,
                 st.session_state.grouped,
@@ -1416,8 +1397,6 @@ if current_step >= 3 and st.session_state.retrieved_modules:
 
             _prog.progress(90, text="🔍 품질 검증 중...")
             _prog.progress(100, text="✅ 완료!")
-            print(f"✅ [제안서 생성 완료] 총 소요: {time.time() - _total_start:.1f}초")
-            print(f"{'='*55}\n")
             time.sleep(0.4)
             _prog.empty()
 
@@ -1686,4 +1665,4 @@ if current_step >= 4 and st.session_state.proposal:
             st.caption("💡 '🔍 AI 검수 시작' 버튼을 다시 누르면 개선본을 재검수합니다.")
 
 st.divider()
-st.caption("💡 Powered by Gemini AI + Claude| 티엔에프컨설팅 제안서 기반")
+st.caption("💡 Powered by Gemini AI + ChromaDB | 티엔에프컨설팅 제안서 202개 기반")
