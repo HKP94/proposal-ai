@@ -356,7 +356,8 @@ def analyze_needs(query, industry, target, duration):
 # ============ [P0-B] Hard-Binding RAG Context ============
 def _embed(text: str) -> list:
     """단일 텍스트 임베딩 생성 (429 rate limit 시 자동 재시도)"""
-    for attempt in range(4):
+    import re as _re
+    for attempt in range(5):
         try:
             result = client_genai.models.embed_content(
                 model=EMBED_MODEL_NAME,
@@ -364,9 +365,11 @@ def _embed(text: str) -> list:
             )
             return result.embeddings[0].values
         except Exception as e:
-            if "429" in str(e) and attempt < 3:
-                wait = 20 * (attempt + 1)
-                print(f"[임베딩 rate limit] {wait}초 후 재시도 (시도 {attempt+1}/4)")
+            if "429" in str(e) and attempt < 4:
+                # API 응답에서 권장 대기 시간 파싱 (예: "Please retry in 21.15s")
+                m = _re.search(r'retry[^\d]*(\d+(?:\.\d+)?)\s*s', str(e), _re.IGNORECASE)
+                wait = int(float(m.group(1))) + 5 if m else 30 * (attempt + 1)
+                print(f"[임베딩 rate limit] {wait}초 후 재시도 (시도 {attempt+1}/5)")
                 time.sleep(wait)
             else:
                 raise e
