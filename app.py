@@ -299,9 +299,23 @@ def load_module_db():
             c = chromadb.PersistentClient(path=MODULE_DB_PATH)
             col = c.get_collection("modules")
             return col, "module"
-        except:
-            pass
+        except Exception as e:
+            print(f"[경고] module_db 로드 실패: {e}")
+            st.warning(f"⚠️ module_db 로드 실패 ({e}). 구버전 DB로 폴백합니다.")
+    else:
+        print(f"[경고] module_db 디렉토리가 없습니다: {MODULE_DB_PATH}")
+        st.warning(
+            "⚠️ module_db가 없습니다. 구버전 DB로 폴백합니다.\n\n"
+            "DB를 새로 구축하려면 터미널에서 아래 명령을 실행하세요:\n"
+            "`python step4_build_module_db.py`"
+        )
+
     # 폴백: 구버전 제안서 단위 DB
+    if not os.path.exists(LEGACY_DB_PATH):
+        raise FileNotFoundError(
+            f"module_db도, 구버전 chroma_db도 존재하지 않습니다.\n"
+            f"먼저 `python step4_build_module_db.py`를 실행하여 DB를 구축하세요."
+        )
     c = chromadb.PersistentClient(path=LEGACY_DB_PATH)
     col = c.get_collection("proposals")
     return col, "legacy"
