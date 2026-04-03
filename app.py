@@ -28,14 +28,6 @@ if not API_KEY:
 client_genai = genai.Client(api_key=API_KEY)
 MODEL_NAME = "gemini-3.1-flash-lite-preview"
 
-# 교육 시간 프레임워크
-DURATION_FRAMEWORK = {
-    "4H (반일)":  {"도입": 1, "핵심": 2, "마무리": 1, "total_h": 4},
-    "8H (1일)":   {"도입": 1, "핵심": 5, "실습": 1, "마무리": 1, "total_h": 8},
-    "16H (2일)":  {"도입": 1, "핵심": 6, "실습": 6, "마무리": 3, "total_h": 16},
-    "24H (3일)":  {"도입": 2, "핵심": 8, "실습": 10, "마무리": 4, "total_h": 24},
-}
-
 # ============ [P0-A] Interactive Needs Gathering ============
 # 필수 정보 체크리스트
 REQUIRED_INFO = {
@@ -307,7 +299,7 @@ def analyze_needs(query, industry, target, duration):
     """
     Gemini API로 자연어 니즈 → 구조화된 JSON 변환
     """
-    duration_h = DURATION_FRAMEWORK.get(duration, {}).get("total_h", 8)
+    duration_h = int(duration)
 
     prompt = f"""당신은 10년 경력의 시니어 HRD 컨설턴트입니다.
 고객이 입력한 교육 니즈를 분석하여 아래 JSON 형식으로 정확하게 변환하세요.
@@ -316,7 +308,7 @@ def analyze_needs(query, industry, target, duration):
 니즈: {query}
 산업군: {industry}
 교육 대상: {target}
-교육 시간: {duration} ({duration_h}H)
+교육 시간: {duration_h}H
 
 [출력 규칙]
 - core_keywords: 교육에서 반드시 다뤄야 할 핵심 역량/주제 키워드 3~5개
@@ -360,7 +352,7 @@ def analyze_needs(query, industry, target, duration):
 
 # ============ Step 2: 모듈 검색 ============
 # ============ [P0-B] Hard-Binding RAG Context ============
-def search_modules_detailed(collection, needs_json, db_type, top_k=8):
+def search_modules_detailed(collection, needs_json, db_type):
     """
     [P0-B] 검색 결과를 상세하게 JSON으로 구조화하여 Gemini 프롬프트에 주입할 수 있는 형태로 반환
     기존의 search_modules()와 동일한 검색 과정이지만, 결과를 상세 JSON으로 포장
@@ -378,7 +370,7 @@ def search_modules_detailed(collection, needs_json, db_type, top_k=8):
     # ChromaDB 검색
     results = collection.query(
         query_embeddings=[embedding],
-        n_results=min(top_k, collection.count())
+        n_results=collection.count()
     )
 
     # [P0-B] 검색 결과를 상세하게 구조화
@@ -549,8 +541,7 @@ def assemble_curriculum(needs_json, grouped_modules, duration, retrieved_modules
     [P1-1] CoT Time Validator: AI가 활동별 소요 시간을 계산하고 자동 조정
     [PM] selected_modules: 사용자가 선택한 모듈 (우선 포함 필수)
     """
-    framework = DURATION_FRAMEWORK.get(duration, DURATION_FRAMEWORK["8H (1일)"])
-    total_h = framework["total_h"]
+    total_h = int(duration)
     total_minutes = total_h * 60
 
     # 각 그룹에서 상위 모듈 선별 (화면 표시용 - 프롬프트에는 사용 안 함)
@@ -682,7 +673,7 @@ def assemble_curriculum(needs_json, grouped_modules, duration, retrieved_modules
 
 **[지침 3] 시간 표기 방식**
 - 시간 컬럼에는 고정값 대신 **범위 형태**로 표기하세요. (예: `60~90분 (제안)`, `90~120분 (제안)`)
-- 총 교육 시간 {duration} ({total_h}H)은 컨설턴트가 최종 조율하는 **참고 기준**입니다.
+- 총 교육 시간 {total_h}H은 컨설턴트가 최종 조율하는 **참고 기준**입니다.
 - 시간을 맞추기 위해 내용을 삭제하는 행위는 엄격히 금지합니다.
 
 4. 반드시 아래 양식을 정확히 따라 작성하세요
@@ -695,7 +686,7 @@ def assemble_curriculum(needs_json, grouped_modules, duration, retrieved_modules
 * **과정명:** (창의적이고 전문적인 과정명)
 * **교육 대상:** {needs_json.get('target')}
 * **교육 목적:** (개괄식으로 2개 작성)
-* **교육 시간:** {duration} ({total_h}H)
+* **교육 시간:** {total_h}H
 * **교육 방식:** (강의형/실습형/워크샵형 중 선택)
 
 ---
@@ -896,11 +887,10 @@ def review_proposal(proposal_text: str, needs_json: dict) -> dict:
 
 
 def improve_proposal(original_proposal: str, review_result: dict,
-                     needs_json: dict, duration: str,
+                     needs_json: dict, duration: int,
                      user_opinion: str = "") -> str:
     """검수 피드백을 반영해 제안서 재생성"""
-    framework = DURATION_FRAMEWORK.get(duration, DURATION_FRAMEWORK["8H (1일)"])
-    total_h = framework["total_h"]
+    total_h = int(duration)
 
     improvement_prompt = review_result.get("개선_지시문", "전반적으로 개선하세요.")
     issues = "\n".join([f"- {i}" for i in review_result.get("개선_필요", [])])
@@ -1014,6 +1004,10 @@ st.caption("고객 니즈 수집 → 니즈 확인 → 모듈 선택 → 맞춤 
 # ── session_state 초기화 ──
 _DEFAULTS = {
     "workflow_step": 1,
+    "company_name": "",
+    "industry": "전산업",
+    "target": "팀장/리더급",
+    "duration": 8,
     "initial_query": None,
     "chatbot_started": False,        # [Sprint 1-1] 명시적 버튼 클릭 전까지 챗봇 비활성
     "needs_conversation": [],
@@ -1039,28 +1033,11 @@ current_step = st.session_state.workflow_step
 
 # ── 사이드바 ──
 with st.sidebar:
-    st.header("📝 고객 정보")
-
-    company_name = st.text_input(
-        "🏢 고객사명",
-        placeholder="예: 삼성전자, 현대자동차, SK하이닉스",
-        help="생성된 제안서에서 [고객사명]을 자동으로 치환합니다."
-    )
-    industry = st.selectbox("산업군", ["전산업", "유통", "금융", "제조", "IT", "건설", "공공", "의료/제약", "교육", "통신/미디어", "기타"])
-    target   = st.selectbox("교육 대상", ["팀장/리더급", "신입사원", "중간관리자", "임원", "전직급", "실무진" , "기타"])
-    duration = st.selectbox("교육 기간", ["4H (반일)", "8H (1일)", "16H (2일)", "24H (3일)"])
-
-    st.divider()
-    st.header("⚙️ 검색 설정")
-    top_k = st.slider("검색할 모듈 수 (내부)", 8, 20, 12)
-
-    st.divider()
     if os.path.exists(MODULE_DB_PATH):
         st.success("✅ 모듈 DB 사용 중")
     else:
         st.warning("⚠️ 모듈 DB 없음")
     st.caption(f"🤖 모델: `{MODEL_NAME}`")
-
     st.divider()
     if st.button("🔄 처음부터 다시 시작", use_container_width=True):
         for _k in list(_DEFAULTS.keys()):
@@ -1068,14 +1045,54 @@ with st.sidebar:
                 del st.session_state[_k]
         st.rerun()
 
+# 세션 상태에서 고객 정보 읽기 (Step 1에서 저장됨)
+company_name = st.session_state.get("company_name", "")
+industry     = st.session_state.get("industry", "전산업")
+target       = st.session_state.get("target", "팀장/리더급")
+duration     = st.session_state.get("duration", 8)
+
 st.divider()
 
 # ─────────────────────────────────────────────────────────
-# STEP 1 : 고객 니즈 입력 & 추가 정보 수집 (챗봇)
+# STEP 1 : 고객 정보 & 니즈 입력
 # ─────────────────────────────────────────────────────────
-st.subheader("1️⃣ 고객 니즈 입력")
+st.subheader("1️⃣ 고객 정보 & 니즈 입력")
 
 if current_step == 1:
+    # ── 고객 기본 정보 ──
+    st.text_input(
+        "🏢 고객사명",
+        key="company_name",
+        placeholder="예: 삼성전자, 현대자동차, SK하이닉스",
+    )
+    col_i1, col_i2, col_i3 = st.columns(3)
+    with col_i1:
+        st.selectbox(
+            "산업군",
+            ["전산업", "유통", "금융", "제조", "IT", "건설", "공공", "의료/제약", "교육", "통신/미디어", "기타"],
+            key="industry",
+        )
+    with col_i2:
+        st.selectbox(
+            "교육 대상",
+            ["팀장/리더급", "신입사원", "중간관리자", "임원", "전직급", "실무진", "기타"],
+            key="target",
+        )
+    with col_i3:
+        st.number_input(
+            "교육 시간 (H)",
+            min_value=1,
+            max_value=100,
+            step=1,
+            key="duration",
+        )
+
+    # 세션 상태 반영 (로컬 변수 갱신)
+    company_name = st.session_state.get("company_name", "")
+    industry     = st.session_state.get("industry", "전산업")
+    target       = st.session_state.get("target", "팀장/리더급")
+    duration     = st.session_state.get("duration", 8)
+
     initial_query_input = st.text_area(
         "고객의 교육 니즈를 자유롭게 입력하세요",
         height=120,
@@ -1173,8 +1190,12 @@ if current_step == 1:
 
 else:
     # Step 1 완료 요약
+    _co  = st.session_state.get("company_name", "")
+    _ind = st.session_state.get("industry", "")
+    _tgt = st.session_state.get("target", "")
+    _dur = st.session_state.get("duration", 8)
     st.markdown(
-        f'<div class="step-done">✅ 니즈 수집 완료: {str(st.session_state.initial_query or "")[:80]}…</div>',
+        f'<div class="step-done">✅ {_co} | {_ind} | {_tgt} | {_dur}H | {str(st.session_state.initial_query or "")[:60]}…</div>',
         unsafe_allow_html=True
     )
 
@@ -1210,7 +1231,7 @@ if current_step >= 2 and st.session_state.needs_json:
                 with st.spinner("📚 관련 모듈 검색 중..."):
                     try:
                         s_results, r_modules, r_modules_json = search_modules_detailed(
-                            collection, nj, db_type, top_k=top_k
+                            collection, nj, db_type
                         )
                         grouped = group_modules_by_type(s_results, db_type)
                         st.session_state.retrieved_modules = r_modules
@@ -1344,7 +1365,7 @@ if current_step >= 3 and st.session_state.retrieved_modules:
         st.divider()
 
         if not company_name.strip():
-            st.warning("⚠️ 사이드바에서 고객사명을 입력해야 제안서를 생성할 수 있습니다.")
+            st.warning("⚠️ 위 고객사명을 입력해야 제안서를 생성할 수 있습니다.")
 
         if st.button(
             "🚀 제안서 생성",
@@ -1615,7 +1636,7 @@ if current_step >= 4 and st.session_state.proposal:
 
             imp_timing = validate_curriculum_timing(
                 st.session_state.improved_proposal,
-                DURATION_FRAMEWORK.get(duration, DURATION_FRAMEWORK["8H (1일)"])["total_h"]
+                int(duration)
             )
             if imp_timing:
                 itc1, itc2 = st.columns([1, 2])
