@@ -3,6 +3,11 @@ raw_data/
 structured_data/
 PPT/
 
+# 전처리 스크립트 (로컬 전용)
+step1_extract.py
+step2_structure.py
+step4_build_module_db.py
+
 # Python 캐시
 __pycache__/
 *.pyc
