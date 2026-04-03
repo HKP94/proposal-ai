@@ -397,10 +397,9 @@ def search_modules_detailed(collection, needs_json, db_type):
         merged = {}  # ChromaDB id → {meta, similarity}
         for query_text in queries:
             embedding = _embed(query_text)
-            time.sleep(1)  # 연속 호출 간 rate limit 방지
             raw = collection.query(
                 query_embeddings=[embedding],
-                n_results=collection.count()
+                n_results=min(100, collection.count())
             )
             for meta, dist, doc_id in zip(
                 raw["metadatas"][0],
