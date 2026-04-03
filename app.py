@@ -373,16 +373,9 @@ def _embed(text: str) -> list:
     raise Exception("임베딩 생성 실패: 최대 재시도 초과")
 
 
-_RRF_K = 60  # RRF 상수 (통상적으로 60 사용)
-
-
 def search_modules_detailed(collection, needs_json, db_type):
     """
-    멀티쿼리 검색 (병렬 임베딩 + RRF 병합): 상위 20개 반환
-    - 쿼리 1: 핵심 키워드 중심
-    - 쿼리 2: 문제점 + 기대 행동 변화 중심
-    - 쿼리 3: 전체 맥락 통합
-    - 병합: RRF (Reciprocal Rank Fusion) — 여러 쿼리에서 일관되게 상위인 모듈 우선
+    단일 쿼리 검색: 상위 20개 반환
     """
     keywords  = needs_json.get("core_keywords", [])
     pain      = needs_json.get("pain_point", "")
@@ -392,50 +385,22 @@ def search_modules_detailed(collection, needs_json, db_type):
 
     retrieved_modules = []
 
+    query_text = f"{target} {' '.join(keywords)} {pain} {behavior} {level}".strip()
+    embedding = _embed(query_text)
+
     if db_type == "module":
-        queries = [
-            " ".join(keywords),
-            f"{pain} {behavior}",
-            f"{target} {' '.join(keywords)} {pain} {level}",
-        ]
-
-        # 3개 임베딩 순차 호출 (0.5s 딜레이로 Burst 제한 방지)
-        embeddings = []
-        for q in queries:
-            embeddings.append(_embed(q))
-            time.sleep(0.5)
-
-        # 각 쿼리로 ChromaDB 검색 후 RRF 점수 계산
-        rrf_scores   = {}  # id → rrf_score (랭킹 정렬용)
-        id_to_meta   = {}  # id → meta
-        id_to_sim    = {}  # id → 최고 유사도 (UI 표시용)
-
-        for embedding in embeddings:
-            raw = collection.query(
-                query_embeddings=[embedding],
-                n_results=min(100, collection.count())
-            )
-            for rank_0idx, (meta, dist, doc_id) in enumerate(zip(
-                raw["metadatas"][0],
-                raw["distances"][0],
-                raw["ids"][0]
-            )):
-                rank = rank_0idx + 1
-                rrf_scores[doc_id] = rrf_scores.get(doc_id, 0.0) + 1.0 / (_RRF_K + rank)
-
-                similarity = round((1 - dist) * 100, 1)
-                if doc_id not in id_to_meta or id_to_sim[doc_id] < similarity:
-                    id_to_meta[doc_id] = meta
-                    id_to_sim[doc_id]  = similarity
-
-        # RRF 점수 내림차순 정렬, 상위 20개
-        top_ids = sorted(rrf_scores, key=lambda x: rrf_scores[x], reverse=True)[:20]
-
-        for idx, doc_id in enumerate(top_ids):
-            meta = id_to_meta[doc_id]
+        raw = collection.query(
+            query_embeddings=[embedding],
+            n_results=min(20, collection.count())
+        )
+        for idx, (meta, dist, doc_id) in enumerate(zip(
+            raw["metadatas"][0],
+            raw["distances"][0],
+            raw["ids"][0]
+        )):
             retrieved_modules.append({
                 "rank": idx + 1,
-                "similarity_percent": id_to_sim[doc_id],
+                "similarity_percent": round((1 - dist) * 100, 1),
                 "모듈명":       meta.get("모듈명", ""),
                 "과정명":       meta.get("과정명", ""),
                 "세부주제목록": meta.get("세부주제목록", ""),
@@ -446,8 +411,6 @@ def search_modules_detailed(collection, needs_json, db_type):
             })
 
     else:
-        # 구버전 폴백: 단일 쿼리
-        embedding = _embed(" ".join(keywords) + " " + pain)
         raw = collection.query(
             query_embeddings=[embedding],
             n_results=min(20, collection.count())
