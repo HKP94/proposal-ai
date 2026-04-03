@@ -1,0 +1,36 @@
+# 파이프라인 스크립트 (앱 실행 불필요)
+step1_extract.py
+step2_structure.py
+step3_deduplicate.py
+step4_build_module_db.py
+
+# 데이터 파일 (앱 실행 불필요)
+raw_data/
+structured_data/
+deduped_modules.json
+
+# 임베딩 캐시 (대용량)
+embed_cache.json
+step4_embed_cache.json
+
+# 로그/모니터링
+step3_log.txt
+step4_log.txt
+step4_monitor.txt
+step4_type_map.json
+
+# 구버전 ChromaDB
+chroma_db/
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+*.pyo
+
+# 환경설정
+.env
+
+# OS
+.DS_Store
+Thumbs.db
