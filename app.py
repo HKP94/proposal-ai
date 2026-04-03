@@ -822,6 +822,8 @@ def assemble_curriculum(needs_json, grouped_modules, duration, retrieved_modules
     for quality_attempt in range(MAX_QUALITY_ATTEMPTS):
         # API 호출 (Rate-limit 재시도 포함)
         curriculum = None
+        print(f"\n⏱️  [생성 시작] quality_attempt={quality_attempt+1}/{MAX_QUALITY_ATTEMPTS}")
+        _gen_start = time.time()
         for api_attempt in range(3):
             try:
                 response = client_genai.models.generate_content(
@@ -833,10 +835,12 @@ def assemble_curriculum(needs_json, grouped_modules, duration, retrieved_modules
             except Exception as e:
                 if "429" in str(e) and api_attempt < 2:
                     wait = 60 * (api_attempt + 1)
+                    print(f"🚨 [API 429 Rate Limit] 제안서 생성 중 발생! {wait}초 강제 대기...")
                     st.warning(f"⏳ API 제한. {wait}초 후 재시도... ({api_attempt+1}/3)")
                     time.sleep(wait)
                 else:
                     raise e
+        print(f"⏱️  [생성 완료] {time.time() - _gen_start:.1f}초 소요")
 
         if curriculum is None:
             raise Exception("API 호출에 실패했습니다.")
@@ -847,12 +851,13 @@ def assemble_curriculum(needs_json, grouped_modules, duration, retrieved_modules
         quality_result = validate_proposal_quality(curriculum)
 
         if quality_result["passed"]:
-            # 품질 기준 통과 → 바로 반환
+            print(f"✅ [QA 통과] attempt={quality_attempt+1}")
             break
 
         if quality_attempt < MAX_QUALITY_ATTEMPTS - 1:
-            # 품질 기준 미달 → 백그라운드 재생성 (에러 노출 없음)
             failures_text = " | ".join(quality_result["failures"])
+            print(f"\n🔄 [QA 재시도 발생: {quality_attempt+1}/{MAX_QUALITY_ATTEMPTS}]")
+            print(f"❌ 실패 사유: {failures_text}")
             # 프롬프트 끝에 실패 원인을 추가하여 재시도
             prompt = prompt + f"""
 
@@ -922,7 +927,9 @@ def review_proposal(proposal_text: str, needs_json: dict) -> dict:
             return json.loads(response.text)
         except Exception as e:
             if "429" in str(e) and attempt < 2:
-                time.sleep(60 * (attempt + 1))
+                wait = 60 * (attempt + 1)
+                print(f"🚨 [API 429 Rate Limit] 검수 중 발생! {wait}초 강제 대기...")
+                time.sleep(wait)
             else:
                 return {"총점": 0, "개선_지시문": str(e), "제출_가능_여부": "오류"}
 
@@ -996,7 +1003,9 @@ def improve_proposal(original_proposal: str, review_result: dict,
             return response.text
         except Exception as e:
             if "429" in str(e) and attempt < 2:
-                time.sleep(60 * (attempt + 1))
+                wait = 60 * (attempt + 1)
+                print(f"🚨 [API 429 Rate Limit] 제안서 개선 중 발생! {wait}초 강제 대기...")
+                time.sleep(wait)
             else:
                 raise e
 
@@ -1426,6 +1435,9 @@ if current_step >= 3 and st.session_state.retrieved_modules:
             _prog.progress(15, text="📚 관련 모듈 검색 중...")
             _prog.progress(35, text="✍️ 커리큘럼 조합 중..." + (" (고도화 모드)" if track == "advanced" else ""))
 
+            _total_start = time.time()
+            print(f"\n{'='*55}")
+            print(f"🚀 [제안서 생성 시작] track={track}, duration={duration}H")
             proposal, timing_result = assemble_curriculum(
                 st.session_state.needs_json,
                 st.session_state.grouped,
@@ -1438,6 +1450,8 @@ if current_step >= 3 and st.session_state.retrieved_modules:
 
             _prog.progress(90, text="🔍 품질 검증 중...")
             _prog.progress(100, text="✅ 완료!")
+            print(f"✅ [제안서 생성 완료] 총 소요: {time.time() - _total_start:.1f}초")
+            print(f"{'='*55}\n")
             time.sleep(0.4)
             _prog.empty()
 
