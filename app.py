@@ -378,29 +378,27 @@ def _embed(text: str) -> list:
 
 def search_modules_detailed(collection, needs_json, db_type):
     """
-    단일 쿼리 검색: 상위 20개 반환
+    단일 쿼리 검색 (원래 로직 복원)
+    - 쿼리: core_keywords + pain_point
+    - n_results: 전체 DB 대상 검색
     """
-    keywords  = needs_json.get("core_keywords", [])
-    pain      = needs_json.get("pain_point", "")
-    behavior  = needs_json.get("expected_behavior", "")
-    level     = needs_json.get("learning_level", "")
-    target    = needs_json.get("target", "")
+    keywords = needs_json.get("core_keywords", [])
+    search_text = " ".join(keywords) + " " + needs_json.get("pain_point", "")
+
+    embedding = _embed(search_text)
+
+    results = collection.query(
+        query_embeddings=[embedding],
+        n_results=collection.count()
+    )
 
     retrieved_modules = []
 
-    query_text = f"{target} {' '.join(keywords)} {pain} {behavior} {level}".strip()
-    embedding = _embed(query_text)
-
     if db_type == "module":
-        raw = collection.query(
-            query_embeddings=[embedding],
-            n_results=min(20, collection.count())
-        )
-        for idx, (meta, dist, doc_id) in enumerate(zip(
-            raw["metadatas"][0],
-            raw["distances"][0],
-            raw["ids"][0]
-        )):
+        metas     = results["metadatas"][0]
+        distances = results["distances"][0]
+
+        for idx, (meta, dist) in enumerate(zip(metas, distances)):
             retrieved_modules.append({
                 "rank": idx + 1,
                 "similarity_percent": round((1 - dist) * 100, 1),
@@ -414,11 +412,10 @@ def search_modules_detailed(collection, needs_json, db_type):
             })
 
     else:
-        raw = collection.query(
-            query_embeddings=[embedding],
-            n_results=min(20, collection.count())
-        )
-        for idx, (meta, dist) in enumerate(zip(raw["metadatas"][0], raw["distances"][0])):
+        metas     = results["metadatas"][0]
+        distances = results["distances"][0]
+
+        for idx, (meta, dist) in enumerate(zip(metas, distances)):
             retrieved_modules.append({
                 "rank": idx + 1,
                 "similarity_percent": round((1 - dist) * 100, 1),
