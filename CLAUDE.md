@@ -91,3 +91,50 @@ git push
 - 재구축 전 기존 `module_db/` 백업 권장
 - `gemini-embedding-exp-03-07` 선택 시 차원이 3072로 변경 → ChromaDB 컬렉션 생성 시 별도 설정 불필요 (자동 감지)
 - 재구축 완료 전까지 앱은 기존 DB로 정상 동작함
+
+---
+
+## [TODO] DB 재구축 시 메타데이터 하드 필터링 적용
+
+### 배경
+`search_modules_detailed()`에서 ChromaDB `where` 파라미터로 `교육대상`을 사전 필터링하면
+검색 공간을 줄이고 정확도를 높일 수 있음.
+
+### 현재 적용 불가한 이유
+`step4_build_module_db.py`가 `교육대상` 필드를 raw JSON 그대로 저장하여
+DB 내 값이 비정규화 상태 (예: "신임팀장", "리더/관리자", "전 직급" 등 혼재).
+UI 드롭다운 값("팀장/리더급", "신입사원" 등)과 정확히 일치하지 않아
+`where={"교육대상": target}` 적용 시 관련 모듈 대부분이 필터링되어 오히려 성능 저하.
+
+### DB 재구축 시 적용 방법
+
+#### 1. `step4_build_module_db.py` 수정 — 교육대상 정규화
+```python
+# 정규화 매핑 추가
+TARGET_NORMALIZE = {
+    "팀장": "팀장/리더급", "리더": "팀장/리더급", "관리자": "팀장/리더급",
+    "신입": "신입사원", "신규": "신입사원",
+    "중간관리": "중간관리자",
+    "임원": "임원", "경영진": "임원",
+}
+def normalize_target(raw: str) -> str:
+    for key, val in TARGET_NORMALIZE.items():
+        if key in raw:
+            return val
+    return "전직급"  # 매핑 실패 시 기본값
+
+# collection.add() metadatas 내:
+"교육대상": normalize_target(item["target"]),
+```
+
+#### 2. `app.py` `search_modules_detailed()` 수정
+```python
+# collection.query() 호출 시 where 파라미터 추가
+raw = collection.query(
+    query_embeddings=[embedding],
+    n_results=min(100, collection.count()),
+    where={"교육대상": target} if target and target != "전직급" else None
+)
+```
+
+> `전직급`은 필터 제외 (모든 대상 포함해야 함).

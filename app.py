@@ -9,6 +9,7 @@ import os
 import re
 import time
 import io
+from concurrent.futures import ThreadPoolExecutor
 from google import genai
 import chromadb
 from docx import Document
@@ -372,12 +373,16 @@ def _embed(text: str) -> list:
     raise Exception("임베딩 생성 실패: 최대 재시도 초과")
 
 
+_RRF_K = 60  # RRF 상수 (통상적으로 60 사용)
+
+
 def search_modules_detailed(collection, needs_json, db_type):
     """
-    멀티쿼리 검색: 니즈를 3가지 관점으로 분해해 각각 검색 후 병합, 상위 20개 반환
+    멀티쿼리 검색 (병렬 임베딩 + RRF 병합): 상위 20개 반환
     - 쿼리 1: 핵심 키워드 중심
     - 쿼리 2: 문제점 + 기대 행동 변화 중심
     - 쿼리 3: 전체 맥락 통합
+    - 병합: RRF (Reciprocal Rank Fusion) — 여러 쿼리에서 일관되게 상위인 모듈 우선
     """
     keywords  = needs_json.get("core_keywords", [])
     pain      = needs_json.get("pain_point", "")
@@ -394,30 +399,41 @@ def search_modules_detailed(collection, needs_json, db_type):
             f"{target} {' '.join(keywords)} {pain} {level}",
         ]
 
-        merged = {}  # ChromaDB id → {meta, similarity}
-        for query_text in queries:
-            embedding = _embed(query_text)
+        # 3개 임베딩 병렬 호출
+        with ThreadPoolExecutor(max_workers=3) as executor:
+            embeddings = list(executor.map(_embed, queries))
+
+        # 각 쿼리로 ChromaDB 검색 후 RRF 점수 계산
+        rrf_scores   = {}  # id → rrf_score (랭킹 정렬용)
+        id_to_meta   = {}  # id → meta
+        id_to_sim    = {}  # id → 최고 유사도 (UI 표시용)
+
+        for embedding in embeddings:
             raw = collection.query(
                 query_embeddings=[embedding],
                 n_results=min(100, collection.count())
             )
-            for meta, dist, doc_id in zip(
+            for rank_0idx, (meta, dist, doc_id) in enumerate(zip(
                 raw["metadatas"][0],
                 raw["distances"][0],
                 raw["ids"][0]
-            ):
+            )):
+                rank = rank_0idx + 1
+                rrf_scores[doc_id] = rrf_scores.get(doc_id, 0.0) + 1.0 / (_RRF_K + rank)
+
                 similarity = round((1 - dist) * 100, 1)
-                if doc_id not in merged or merged[doc_id]["similarity"] < similarity:
-                    merged[doc_id] = {"meta": meta, "similarity": similarity}
+                if doc_id not in id_to_meta or id_to_sim[doc_id] < similarity:
+                    id_to_meta[doc_id] = meta
+                    id_to_sim[doc_id]  = similarity
 
-        # 유사도 내림차순 정렬, 상위 20개
-        top_items = sorted(merged.values(), key=lambda x: x["similarity"], reverse=True)[:20]
+        # RRF 점수 내림차순 정렬, 상위 20개
+        top_ids = sorted(rrf_scores, key=lambda x: rrf_scores[x], reverse=True)[:20]
 
-        for idx, item in enumerate(top_items):
-            meta = item["meta"]
+        for idx, doc_id in enumerate(top_ids):
+            meta = id_to_meta[doc_id]
             retrieved_modules.append({
                 "rank": idx + 1,
-                "similarity_percent": item["similarity"],
+                "similarity_percent": id_to_sim[doc_id],
                 "모듈명":       meta.get("모듈명", ""),
                 "과정명":       meta.get("과정명", ""),
                 "세부주제목록": meta.get("세부주제목록", ""),
