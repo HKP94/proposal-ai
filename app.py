@@ -1039,7 +1039,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📋 제안서 AI 어시스턴트 v3.0")
+st.title("📋 제안서 AI 어시스턴트 v5.0")
 st.caption("고객 니즈 수집 → 니즈 확인 → 모듈 선택 → 맞춤 제안서 생성")
 
 # ── session_state 초기화 ──
@@ -1706,4 +1706,4 @@ if current_step >= 4 and st.session_state.proposal:
             st.caption("💡 '🔍 AI 검수 시작' 버튼을 다시 누르면 개선본을 재검수합니다.")
 
 st.divider()
-st.caption("💡 Powered by Gemini AI + ChromaDB | 티엔에프컨설팅 제안서 202개 기반")
+st.caption("💡 Powered by Gemini AI + Claude| 티엔에프컨설팅 제안서 기반")
