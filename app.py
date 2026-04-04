@@ -376,23 +376,61 @@ def _embed_batch(queries: list) -> list:
     raise Exception("임베딩 생성 실패: 최대 재시도 초과")
 
 
+def _generate_search_queries(needs_json: dict) -> list:
+    """
+    Gemini로 모듈 검색에 최적화된 쿼리 3개 생성.
+    - 주제 특화 동의어/관련어 확장
+    - 하드코딩 쿼리 대비 훨씬 높은 검색 적합도
+    - 실패 시 기본 쿼리로 폴백
+    """
+    kw   = needs_json.get("core_keywords", [])
+    pain = needs_json.get("pain_point", "")
+    behavior = needs_json.get("expected_behavior", "")
+
+    prompt = f"""당신은 HRD 교육 모듈 DB 검색 전문가입니다.
+아래 교육 니즈를 보고, 벡터 DB 검색에 최적화된 검색 쿼리 3개를 생성하세요.
+
+교육 니즈:
+- 핵심 키워드: {', '.join(kw)}
+- 문제점: {pain}
+- 기대 행동 변화: {behavior}
+
+규칙:
+1. 쿼리 1: 핵심 주제와 관련 동의어·유사어를 모두 포함 (예: "윤리경영" → "윤리경영 컴플라이언스 도덕적의사결정 청렴 부패방지")
+2. 쿼리 2: 교육 내용 관점 — 모듈에서 다룰 법한 구체적 학습 내용·스킬
+3. 쿼리 3: 현업 적용 관점 — 교육 후 실제 업무에서 쓰는 상황·행동
+
+반드시 JSON 배열로만 응답: ["쿼리1", "쿼리2", "쿼리3"]"""
+
+    try:
+        resp = client_genai.models.generate_content(
+            model=MODEL_NAME,
+            contents=prompt,
+            config={"response_mime_type": "application/json"}
+        )
+        queries = json.loads(resp.text)
+        if isinstance(queries, list) and len(queries) >= 3:
+            print(f"[검색 쿼리 생성] {queries}")
+            return [str(q) for q in queries[:3]]
+    except Exception as e:
+        print(f"[검색 쿼리 생성 실패, 기본 쿼리 사용] {e}")
+
+    # 폴백: 기본 쿼리
+    return [
+        " ".join(kw),
+        f"{pain} {behavior}",
+        " ".join(kw) + f" {pain}",
+    ]
+
+
 def search_modules_detailed(collection, needs_json, db_type):
     """
     멀티쿼리 검색 + RRF 병합: 상위 20개 반환
-    - 3개 쿼리를 배치 API 1회 호출로 임베딩 (속도 개선)
-    - RRF(Reciprocal Rank Fusion)로 공통 상위 모듈 우선 정렬 (정확도 개선)
+    - LLM이 주제 최적화 쿼리 3개 생성 (동의어 확장, 주제 집중)
+    - 배치 임베딩 1회 API 호출
+    - RRF로 공통 상위 모듈 우선 정렬
     """
-    keywords = needs_json.get("core_keywords", [])
-    pain     = needs_json.get("pain_point", "")
-    behavior = needs_json.get("expected_behavior", "")
-    level    = needs_json.get("learning_level", "")
-    target   = needs_json.get("target", "")
-
-    queries = [
-        " ".join(keywords),
-        f"{pain} {behavior}",
-        f"{target} {' '.join(keywords)} {pain} {level}",
-    ]
+    queries = _generate_search_queries(needs_json)
 
     # 3개 쿼리를 배치로 임베딩 (API 호출 1회)
     embeddings = _embed_batch(queries)
