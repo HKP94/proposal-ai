@@ -1138,63 +1138,126 @@ def review_proposal(proposal_text: str, needs_json: dict) -> dict:
 
 def improve_proposal(original_proposal: str, review_result: dict,
                      needs_json: dict, duration: int,
-                     user_opinion: str = "") -> str:
-    """검수 피드백을 반영해 제안서 재생성"""
+                     user_opinion: str = "",
+                     retrieved_modules_json: str = None,
+                     grouped_modules: dict = None) -> str:
+    """
+    피드백을 반영하여 제안서를 모듈 DB 기반으로 완전 재생성.
+    - user_opinion 있으면 최우선 반영
+    - review_result 있으면 보조 반영
+    - retrieved_modules_json으로 실제 모듈 내용 재조합 (assemble_curriculum과 동일 방식)
+    """
     total_h = int(duration)
+    total_minutes = total_h * 60
 
-    improvement_prompt = review_result.get("개선_지시문", "전반적으로 개선하세요.")
-    issues = "\n".join([f"- {i}" for i in review_result.get("개선_필요", [])])
+    # ── 피드백 지시 섹션 구성 ──
+    improvement_prompt = review_result.get("개선_지시문", "")
+    issues   = "\n".join([f"- {i}" for i in review_result.get("개선_필요", [])])
     critical = "\n".join([f"- {i}" for i in review_result.get("즉시_수정_필요", [])])
 
-    if user_opinion.strip():
-        feedback_section = f"""## 사용자 직접 지시 (최우선 반영)
+    if user_opinion.strip() and improvement_prompt:
+        feedback_section = f"""## ⭐ 최우선 수정 지시 (사용자 직접 요청 — 반드시 100% 반영)
 {user_opinion.strip()}
 
-## 검수자 피드백 (위 사용자 지시와 충돌하지 않는 범위에서 반영)
+## 검수자 보완 의견 (위 지시와 충돌하지 않는 범위에서 반영)
 {improvement_prompt}
-
-### 개선 필요 사항
-{issues}
-
-### 즉시 수정 필수
-{critical}"""
+{f"### 개선 필요{chr(10)}{issues}" if issues else ""}
+{f"### 즉시 수정{chr(10)}{critical}" if critical else ""}"""
+    elif user_opinion.strip():
+        feedback_section = f"""## ⭐ 최우선 수정 지시 (사용자 직접 요청 — 반드시 100% 반영)
+{user_opinion.strip()}"""
     else:
         feedback_section = f"""## 검수자 피드백 (반드시 모두 반영)
 {improvement_prompt}
+{f"### 개선 필요{chr(10)}{issues}" if issues else ""}
+{f"### 즉시 수정{chr(10)}{critical}" if critical else ""}"""
 
-### 개선 필요 사항
-{issues}
+    # ── 모듈 DB 섹션 구성 (assemble_curriculum과 동일) ──
+    modules_section = ""
+    if retrieved_modules_json:
+        modules_section = f"""
+## ⭐ [RAG] 검색된 교육 모듈 (이 모듈 내용을 레고 블록처럼 재조합하여 사용)
+아래 모듈들의 "내용_원문"에서 구체적인 활동을 추출하여 커리큘럼에 반영하세요.
+이 목록에 없는 새로운 활동을 창작하지 마세요.
 
-### 즉시 수정 필수
-{critical}"""
+```json
+{retrieved_modules_json}
+```
+"""
+    elif grouped_modules:
+        def fmt(mods, limit=5):
+            out = []
+            for m in mods[:limit]:
+                meta = m["meta"]
+                out.append(f"- [{meta.get('과정명','')}] {meta.get('모듈명','')}\n  내용: {meta.get('내용_원문','')[:150]}")
+            return "\n".join(out) if out else "없음"
+        modules_section = f"""
+## 참고 교육 모듈
+### 도입: {fmt(grouped_modules.get('intro', []))}
+### 핵심: {fmt(grouped_modules.get('core', []), 8)}
+### 적용: {fmt(grouped_modules.get('apply', []))}
+"""
 
     prompt = f"""당신은 10년 경력의 시니어 HRD 컨설턴트입니다.
-아래 1차 제안서를 피드백을 반영하여 완성도 높게 개선하세요.
+아래 수정 지시와 교육 모듈을 바탕으로, 기존 제안서를 **처음부터 완전히 재작성**하세요.
+단순 편집이 아니라, 수정 지시를 완전히 반영한 새 제안서를 생성하는 것이 목표입니다.
 
 {feedback_section}
 
-## 고객 니즈
-- 대상: {needs_json.get('target')} | 산업: {needs_json.get('industry')} | {total_h}H
+## 고객 니즈 (재분석 기준)
+- 교육 대상: {needs_json.get('target')}
+- 산업군: {needs_json.get('industry')}
 - 핵심 키워드: {', '.join(needs_json.get('core_keywords', []))}
+- 현재 문제점: {needs_json.get('pain_point')}
 - 기대 행동 변화: {needs_json.get('expected_behavior')}
-
-## 1차 제안서 (개선 기준)
+- 교육 시간: {total_h}H (= {total_minutes}분)
+{modules_section}
+## 기존 제안서 (참고용 — 수정 지시가 우선)
 {original_proposal}
 
 ---
-위 피드백을 100% 반영하여, 동일한 섹션 구조(과정 개요 → 상세 커리큘럼)로
-마크다운 형식의 개선된 제안서를 작성하세요.
 
-커리큘럼 작성 시 반드시 아래 양식을 사용하세요 (표 사용 절대 금지):
-### N. [모듈 주제명] (XX~XX분 제안)
+## 재작성 지침
+
+### [포맷팅 절대 규칙]
+- 마크다운 표(table) 사용 절대 금지
+- 각 모듈당 세부 항목 5개 이상
+- 각 모듈에 [토의]/[실습]/[롤플레잉]/[워크샵]/[사례분석] 중 하나 이상
+- 시간 표기: `60~90분 (제안)` 형태의 범위
+
+### [재작성 원칙]
+1. 수정 지시 사항을 최우선으로 반영하여 처음부터 다시 씁니다.
+2. 교육 모듈이 제공된 경우, 해당 모듈의 실제 내용("내용_원문")을 활용합니다.
+3. 기존 제안서의 좋은 부분은 유지하되, 수정 지시와 충돌하면 지시를 따릅니다.
+4. 내용 축소 절대 금지 — 각 모듈당 최소 5개 이상의 구체적 세부 내용을 작성합니다.
+
+반드시 아래 양식으로 완성된 제안서를 작성하세요:
+
+---
+
+# 맞춤 교육 제안서
+
+## 📋 과정 개요
+* **과정명:** (창의적이고 전문적인 과정명)
+* **교육 대상:** {needs_json.get('target')}
+* **교육 목적:** (개괄식으로 2개 작성)
+* **교육 시간:** {total_h}H
+* **교육 방식:** (강의형/실습형/워크샵형 중 선택)
+
+---
+
+## 📚 상세 커리큘럼
+
+### 1. [모듈 주제명] (60~90분 제안)
 - 주요 학습 내용 요약
-  - 세부 내용 1~5개 이상
-  - [실습/토의/롤플레잉/워크샵/사례분석] 활동명 (대괄호 필수)
+  - 세부 상세 내용 1
+  - 세부 상세 내용 2
+  - 세부 상세 내용 3
+  - 세부 상세 내용 4
+  - 세부 상세 내용 5
+  - [실습/토의/롤플레잉] 구체적 활동명 및 실행 방법
 
-## 개선 시 반드시 지켜야 할 품질 기준
-- **내용 축소 절대 금지**: 각 모듈당 세부 항목 5개 이상, 내용을 요약하거나 줄이지 마세요.
-- **상호작용 활동 필수**: 각 모듈에 `[토의]`, `[실습]`, `[롤플레잉]`, `[워크샵]`, `[사례분석]` 중 최소 1개 이상 포함하고 구체적 실행 방법을 명시하세요.
-- **시간 표기**: 시간 컬럼은 `60~90분 (제안)` 형태의 범위로 표기하세요."""
+(모듈은 교육 시간에 따라 자유롭게 추가. 표 사용 절대 금지)"""
 
     for attempt in range(3):
         try:
@@ -1907,7 +1970,9 @@ if current_step >= 4 and st.session_state.proposal:
                 _review_for_improve,
                 nj,
                 duration,
-                user_opinion=user_opinion
+                user_opinion=user_opinion,
+                retrieved_modules_json=st.session_state.retrieved_modules_json,
+                grouped_modules=st.session_state.grouped,
             )
         improved = re.sub(r'<br\s*/?>', '\n- ', improved)
         improved = re.sub(r'<[^>]+>', '', improved)
