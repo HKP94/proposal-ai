@@ -1182,7 +1182,7 @@ def improve_proposal(original_proposal: str, review_result: dict,
 {original_proposal}
 
 ---
-위 피드백을 100% 반영하여, 동일한 섹션 구조(과정 개요 → 교육 목표 → 상세 커리큘럼 → 기대 효과)로
+위 피드백을 100% 반영하여, 동일한 섹션 구조(과정 개요 → 상세 커리큘럼)로
 마크다운 형식의 개선된 제안서를 작성하세요.
 
 커리큘럼 작성 시 반드시 아래 양식을 사용하세요 (표 사용 절대 금지):
@@ -1824,116 +1824,130 @@ if current_step >= 4 and st.session_state.proposal:
 
     if st.session_state.review:
         review = st.session_state.review
-        total  = review.get("총점", 0)
 
-        score_color  = "#16a34a" if total >= 80 else "#d97706" if total >= 60 else "#dc2626"
-        verdict      = review.get("제출_가능_여부", "")
-        verdict_icon = "✅" if "즉시" in verdict else "⚠️" if "수정" in verdict else "❌"
+        if review.get("제출_가능_여부") == "오류":
+            st.error(f"❌ AI 검수 중 오류가 발생했습니다: {review.get('개선_지시문', '')}")
+            st.caption("'🔍 AI 검수 시작' 버튼을 다시 눌러 재시도하거나, 아래 6단계에서 직접 피드백을 입력해 재작성할 수 있습니다.")
+        else:
+            total  = review.get("총점", 0)
 
-        col_sc, col_detail = st.columns([1, 2])
-        with col_sc:
-            st.markdown(f"""
+            score_color  = "#16a34a" if total >= 80 else "#d97706" if total >= 60 else "#dc2626"
+            verdict      = review.get("제출_가능_여부", "")
+            verdict_icon = "✅" if "즉시" in verdict else "⚠️" if "수정" in verdict else "❌"
+
+            col_sc, col_detail = st.columns([1, 2])
+            with col_sc:
+                st.markdown(f"""
 <div style="text-align:center; padding:20px; background:#f9fafb;
             border-radius:12px; border: 2px solid {score_color}">
 <div style="font-size:3em; font-weight:bold; color:{score_color}">{total}</div>
 <div style="color:#6b7280">/ 100점</div>
 </div>""", unsafe_allow_html=True)
 
-        with col_detail:
-            scores  = review.get("항목별_점수", {})
-            max_map = {"니즈_적합성": 25, "커리큘럼_완성도": 35, "전문성_표현": 25, "제출_가능성": 15}
-            for k, v in scores.items():
-                ms = max_map.get(k, 25)
-                st.markdown(f"**{k}** {v}/{ms}점")
-                st.progress(int(v / ms * 100) / 100)
+            with col_detail:
+                scores  = review.get("항목별_점수", {})
+                max_map = {"니즈_적합성": 25, "커리큘럼_완성도": 35, "전문성_표현": 25, "제출_가능성": 15}
+                for k, v in scores.items():
+                    ms = max_map.get(k, 25)
+                    st.markdown(f"**{k}** {v}/{ms}점")
+                    st.progress(int(v / ms * 100) / 100)
 
-        st.markdown(f"**{verdict_icon} 제출 가능 여부:** {verdict}")
-        st.divider()
-
-        col_good, col_bad = st.columns(2)
-        with col_good:
-            st.markdown("**✅ 잘된 점**")
-            for item in review.get("잘된_점", []):
-                st.markdown(f"- {item}")
-        with col_bad:
-            st.markdown("**🔧 개선 필요**")
-            for item in review.get("개선_필요", []):
-                st.markdown(f"- {item}")
-
-        if review.get("즉시_수정_필요"):
-            st.warning("**⚠️ 즉시 수정 필수**\n" +
-                       "\n".join(f"- {i}" for i in review["즉시_수정_필요"]))
-
-        st.info(f"**📌 검수자 개선 지시문:**\n{review.get('개선_지시문', '')}")
-
-        # ── STEP 6 : 피드백 반영 재생성 ──
-        st.divider()
-        st.subheader("6️⃣ 피드백 반영 재생성")
-
-        user_opinion = st.text_area(
-            "✏️ 추가 의견 (선택)",
-            placeholder="예: 3모듈의 실습 시간을 늘려주세요. 사례 연구를 금융권 중심으로 바꿔주세요.\n비워두면 위 검수자 의견 중심으로 개선합니다.",
-            height=100,
-            key="user_opinion_input"
-        )
-
-        if st.button(
-            "🔄 검수 피드백 반영하여 제안서 개선",
-            use_container_width=True,
-            disabled=(total >= 90),
-            key="improve_btn"
-        ):
-            with st.spinner("✍️ 검수 피드백을 반영하여 제안서 개선 중..."):
-                improved = improve_proposal(
-                    proposal,
-                    review,
-                    nj,
-                    duration,
-                    user_opinion=user_opinion
-                )
-            # [P2] HTML 태그 정규화 클렌징
-            improved = re.sub(r'<br\s*/?>', '\n- ', improved)   # <br> → 리스트 항목 형식
-            improved = re.sub(r'<[^>]+>', '', improved)          # 나머지 HTML 태그 제거
-            improved, _ = replace_placeholders(improved, company_name)
-            st.session_state.improved_proposal = improved
-
-        if total >= 90:
-            st.caption("✅ 90점 이상 — 즉시 제출 가능한 수준입니다!")
-
-        if st.session_state.improved_proposal:
-            st.success("✅ 개선된 제안서가 생성되었습니다.")
-            st.markdown(st.session_state.improved_proposal)
+            st.markdown(f"**{verdict_icon} 제출 가능 여부:** {verdict}")
             st.divider()
 
-            imp_timing = validate_curriculum_timing(
-                st.session_state.improved_proposal,
-                int(duration)
+            col_good, col_bad = st.columns(2)
+            with col_good:
+                st.markdown("**✅ 잘된 점**")
+                for item in review.get("잘된_점", []):
+                    st.markdown(f"- {item}")
+            with col_bad:
+                st.markdown("**🔧 개선 필요**")
+                for item in review.get("개선_필요", []):
+                    st.markdown(f"- {item}")
+
+            if review.get("즉시_수정_필요"):
+                st.warning("**⚠️ 즉시 수정 필수**\n" +
+                           "\n".join(f"- {i}" for i in review["즉시_수정_필요"]))
+
+            st.info(f"**📌 검수자 개선 지시문:**\n{review.get('개선_지시문', '')}")
+
+    # ── STEP 6 : 피드백 반영 재생성 ──
+    st.divider()
+    st.subheader("6️⃣ 피드백 반영 재생성")
+
+    user_opinion = st.text_area(
+        "✏️ 수정 요청 작성 (선택)",
+        placeholder="예: 3모듈의 실습 시간을 늘려주세요. 사례 연구를 금융권 중심으로 바꿔주세요.\n비워두면 위 AI 검수 결과를 기반으로 재작성합니다.",
+        height=100,
+        key="user_opinion_input"
+    )
+
+    _has_valid_review = (
+        st.session_state.review is not None
+        and st.session_state.review.get("제출_가능_여부") != "오류"
+    )
+    _can_rewrite = bool(user_opinion.strip()) or _has_valid_review
+
+    if not _can_rewrite:
+        st.caption("💡 수정 요청을 입력하거나, 먼저 'AI 검수 시작'을 실행하세요.")
+
+    if st.button(
+        "🔄 제안서 재작성",
+        use_container_width=True,
+        disabled=not _can_rewrite,
+        key="improve_btn"
+    ):
+        _review_for_improve = (
+            st.session_state.review if _has_valid_review
+            else {"개선_지시문": "", "개선_필요": [], "즉시_수정_필요": []}
+        )
+        with st.spinner("✍️ 제안서 재작성 중..."):
+            improved = improve_proposal(
+                st.session_state.improved_proposal or proposal,
+                _review_for_improve,
+                nj,
+                duration,
+                user_opinion=user_opinion
             )
-            if imp_timing:
-                itc1, itc2 = st.columns([1, 2])
-                with itc1:
-                    im = imp_timing["total_minutes_allocated"]
-                    st.metric("개선본 배분 시간", f"{im}분 ({im/60:.1f}H)")
-                with itc2:
-                    if imp_timing["valid"]:
-                        st.success(f"✅ 시간 정합성 OK | 여유: {imp_timing['variance_minutes']}분")
-                    else:
-                        st.error(f"❌ 시간 초과: {abs(imp_timing['variance_minutes'])}분 과다")
+        improved = re.sub(r'<br\s*/?>', '\n- ', improved)
+        improved = re.sub(r'<[^>]+>', '', improved)
+        improved, _ = replace_placeholders(improved, company_name)
+        st.session_state.improved_proposal = improved
 
-            try:
-                imp_docx = markdown_to_docx(st.session_state.improved_proposal)
-                st.download_button(
-                    "📄 개선본 Word 다운로드 (.docx)",
-                    data=imp_docx,
-                    file_name=f"제안서_{keyword}_개선본.docx",
-                    mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
-                    use_container_width=True,
-                    type="primary"
-                )
-            except Exception:
-                pass
+    if st.session_state.improved_proposal:
+        st.success("✅ 재작성된 제안서입니다.")
+        st.markdown(st.session_state.improved_proposal)
+        st.divider()
 
-            st.caption("💡 '🔍 AI 검수 시작' 버튼을 다시 누르면 개선본을 재검수합니다.")
+        imp_timing = validate_curriculum_timing(
+            st.session_state.improved_proposal,
+            int(duration)
+        )
+        if imp_timing:
+            itc1, itc2 = st.columns([1, 2])
+            with itc1:
+                im = imp_timing["total_minutes_allocated"]
+                st.metric("재작성본 배분 시간", f"{im}분 ({im/60:.1f}H)")
+            with itc2:
+                if imp_timing["valid"]:
+                    st.success(f"✅ 시간 정합성 OK | 여유: {imp_timing['variance_minutes']}분")
+                else:
+                    st.error(f"❌ 시간 초과: {abs(imp_timing['variance_minutes'])}분 과다")
+
+        try:
+            imp_docx = markdown_to_docx(st.session_state.improved_proposal)
+            st.download_button(
+                "📄 재작성본 Word 다운로드 (.docx)",
+                data=imp_docx,
+                file_name=f"제안서_{keyword}_재작성본.docx",
+                mime="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+                use_container_width=True,
+                type="primary"
+            )
+        except Exception:
+            pass
+
+        st.caption("💡 '🔍 AI 검수 시작' 버튼을 다시 누르면 재작성본을 검수합니다.")
 
 st.divider()
 st.caption("💡 Powered by Gemini AI + ChromaDB | 티엔에프컨설팅 제안서 202개 기반")
