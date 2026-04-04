@@ -352,95 +352,122 @@ def analyze_needs(query, industry, target, duration):
 
 # ============ Step 2: 모듈 검색 ============
 # ============ [P0-B] Hard-Binding RAG Context ============
+
+_RRF_K = 60  # RRF 상수
+
+def _embed_batch(queries: list) -> list:
+    """여러 텍스트를 1회 배치 API 호출로 임베딩 (429 재시도 포함)"""
+    import re as _re
+    for attempt in range(5):
+        try:
+            result = client_genai.models.embed_content(
+                model="gemini-embedding-001",
+                contents=queries
+            )
+            return [e.values for e in result.embeddings]
+        except Exception as e:
+            if "429" in str(e) and attempt < 4:
+                m = _re.search(r'retry[^\d]*(\d+(?:\.\d+)?)\s*s', str(e), _re.IGNORECASE)
+                wait = int(float(m.group(1))) + 5 if m else 30 * (attempt + 1)
+                print(f"[임베딩 rate limit] {wait}초 후 재시도 (시도 {attempt+1}/5)")
+                time.sleep(wait)
+            else:
+                raise e
+    raise Exception("임베딩 생성 실패: 최대 재시도 초과")
+
+
 def search_modules_detailed(collection, needs_json, db_type):
     """
-    [P0-B] 검색 결과를 상세하게 JSON으로 구조화하여 Gemini 프롬프트에 주입할 수 있는 형태로 반환
-    기존의 search_modules()와 동일한 검색 과정이지만, 결과를 상세 JSON으로 포장
+    멀티쿼리 검색 + RRF 병합: 상위 20개 반환
+    - 3개 쿼리를 배치 API 1회 호출로 임베딩 (속도 개선)
+    - RRF(Reciprocal Rank Fusion)로 공통 상위 모듈 우선 정렬 (정확도 개선)
     """
     keywords = needs_json.get("core_keywords", [])
-    search_text = " ".join(keywords) + " " + needs_json.get("pain_point", "")
+    pain     = needs_json.get("pain_point", "")
+    behavior = needs_json.get("expected_behavior", "")
+    level    = needs_json.get("learning_level", "")
+    target   = needs_json.get("target", "")
 
-    # 임베딩 생성
-    result = client_genai.models.embed_content(
-        model="gemini-embedding-001",
-        contents=search_text
-    )
-    embedding = result.embeddings[0].values
+    queries = [
+        " ".join(keywords),
+        f"{pain} {behavior}",
+        f"{target} {' '.join(keywords)} {pain} {level}",
+    ]
 
-    # ChromaDB 검색
-    results = collection.query(
-        query_embeddings=[embedding],
-        n_results=collection.count()
-    )
+    # 3개 쿼리를 배치로 임베딩 (API 호출 1회)
+    embeddings = _embed_batch(queries)
 
-    # [P0-B] 검색 결과를 상세하게 구조화
+    # RRF 점수 계산
+    rrf_scores = {}  # doc_id → RRF score
+    id_to_meta = {}  # doc_id → metadata
+    id_to_sim  = {}  # doc_id → 최고 유사도 (UI 표시용)
+
+    n_results = min(100, collection.count())
+    for embedding in embeddings:
+        raw = collection.query(
+            query_embeddings=[embedding],
+            n_results=n_results
+        )
+        for rank_0idx, (meta, dist, doc_id) in enumerate(zip(
+            raw["metadatas"][0],
+            raw["distances"][0],
+            raw["ids"][0]
+        )):
+            rank = rank_0idx + 1
+            rrf_scores[doc_id] = rrf_scores.get(doc_id, 0.0) + 1.0 / (_RRF_K + rank)
+            similarity = round((1 - dist) * 100, 1)
+            if doc_id not in id_to_meta or id_to_sim[doc_id] < similarity:
+                id_to_meta[doc_id] = meta
+                id_to_sim[doc_id]  = similarity
+
+    # RRF 내림차순 정렬, 상위 20개
+    top_ids = sorted(rrf_scores, key=lambda x: rrf_scores[x], reverse=True)[:20]
+
     retrieved_modules = []
-
     if db_type == "module":
-        metas = results["metadatas"][0]
-        distances = results["distances"][0]
-
-        for idx, (meta, dist) in enumerate(zip(metas, distances)):
-            similarity = round((1 - dist) * 100, 1)
-
-            # 핵심: 모듈의 세부 내용을 모두 포함
-            module_detail = {
+        for idx, doc_id in enumerate(top_ids):
+            meta = id_to_meta[doc_id]
+            retrieved_modules.append({
                 "rank": idx + 1,
-                "similarity_percent": similarity,
-                "모듈명": meta.get("모듈명", ""),
-                "과정명": meta.get("과정명", ""),
+                "similarity_percent": id_to_sim[doc_id],
+                "모듈명":       meta.get("모듈명", ""),
+                "과정명":       meta.get("과정명", ""),
                 "세부주제목록": meta.get("세부주제목록", ""),
-                "세부내용요약": meta.get("세부내용요약", ""),  # ← 핵심 콘텐츠
-                "권장시간": meta.get("권장시간", ""),
-                "교육방식": meta.get("교육방식", ""),
-                "모듈성격": meta.get("모듈성격", "core"),
-            }
-            retrieved_modules.append(module_detail)
-    else:
-        # 구버전 폴백
-        metas = results["metadatas"][0]
-        distances = results["distances"][0]
-        for idx, (meta, dist) in enumerate(zip(metas, distances)):
-            similarity = round((1 - dist) * 100, 1)
-            module_detail = {
-                "rank": idx + 1,
-                "similarity_percent": similarity,
-                "과정명": meta.get("과정명", ""),
                 "세부내용요약": meta.get("세부내용요약", ""),
-                "권장시간": meta.get("권장시간", ""),
-            }
-            retrieved_modules.append(module_detail)
+                "권장시간":     meta.get("권장시간", ""),
+                "교육방식":     meta.get("교육방식", ""),
+                "모듈성격":     meta.get("모듈성격", "core"),
+            })
+    else:
+        # 구버전 폴백: 단일 쿼리
+        raw = collection.query(query_embeddings=[embeddings[0]], n_results=min(20, collection.count()))
+        for idx, (meta, dist) in enumerate(zip(raw["metadatas"][0], raw["distances"][0])):
+            retrieved_modules.append({
+                "rank": idx + 1,
+                "similarity_percent": round((1 - dist) * 100, 1),
+                "과정명":       meta.get("과정명", ""),
+                "세부내용요약": meta.get("세부내용요약", ""),
+                "권장시간":     meta.get("권장시간", ""),
+            })
 
-    # JSON 형식으로 정렬하여 반환
     retrieved_json = json.dumps(retrieved_modules, ensure_ascii=False, indent=2)
-    return results, retrieved_modules, retrieved_json
+    return retrieved_modules, retrieved_json
 
 
-def group_modules_by_type(search_results, db_type):
+def group_modules_by_type(retrieved_modules, db_type):
     """
-    검색된 모듈을 성격별로 그룹핑: intro / core / apply
+    retrieved_modules 리스트를 모듈성격별로 그룹핑: intro / core / apply
     """
     groups = {"intro": [], "core": [], "apply": []}
 
-    if db_type == "module":
-        metas = search_results["metadatas"][0]
-        docs = search_results["documents"][0]
-        distances = search_results["distances"][0]
-
-        for meta, doc, dist in zip(metas, docs, distances):
-            module_type = meta.get("모듈성격", "core")
-            similarity = round((1 - dist) * 100, 1)
-            groups[module_type].append({
-                "meta": meta,
-                "similarity": similarity,
-            })
-    else:
-        # 구버전 폴백
-        metas = search_results["metadatas"][0]
-        distances = search_results["distances"][0]
-        for meta, dist in zip(metas, distances):
-            similarity = round((1 - dist) * 100, 1)
-            groups["core"].append({"meta": meta, "similarity": similarity})
+    for m in retrieved_modules:
+        module_type = m.get("모듈성격", "core") if db_type == "module" else "core"
+        if module_type not in groups:
+            module_type = "core"
+        groups[module_type].append({
+            "meta": {k: v for k, v in m.items() if k not in ("rank", "similarity_percent", "모듈성격")},
+            "similarity": m.get("similarity_percent", 0),
+        })
 
     return groups
 
@@ -1230,10 +1257,10 @@ if current_step >= 2 and st.session_state.needs_json:
                 collection, db_type = load_module_db()
                 with st.spinner("📚 관련 모듈 검색 중..."):
                     try:
-                        s_results, r_modules, r_modules_json = search_modules_detailed(
+                        r_modules, r_modules_json = search_modules_detailed(
                             collection, nj, db_type
                         )
-                        grouped = group_modules_by_type(s_results, db_type)
+                        grouped = group_modules_by_type(r_modules, db_type)
                         st.session_state.retrieved_modules = r_modules
                         st.session_state.retrieved_modules_json = r_modules_json
                         st.session_state.grouped = grouped
