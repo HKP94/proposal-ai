@@ -1364,10 +1364,7 @@ if current_step >= 3 and st.session_state.retrieved_modules:
                 with st.expander(
                     f"{tag} **{mod_name}** | {course} | {rec_time} | {stars} ({sim}%)"
                 ):
-                    st.markdown(f"**세부 주제:** {topics}")
-                    st.markdown(f"**교육 방식:** {edu_type}")
                     if content:
-                        st.markdown("**세부 내용:**")
                         for ln in content.split("\n"):
                             if ln.strip():
                                 st.markdown(f"- {ln.strip()}")
