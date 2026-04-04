@@ -1140,98 +1140,150 @@ def improve_proposal(original_proposal: str, review_result: dict,
                      needs_json: dict, duration: int,
                      user_opinion: str = "",
                      retrieved_modules_json: str = None,
-                     grouped_modules: dict = None) -> str:
+                     grouped_modules: dict = None) -> tuple:
     """
-    피드백을 반영하여 제안서를 모듈 DB 기반으로 완전 재생성.
-    - user_opinion 있으면 최우선 반영
-    - review_result 있으면 보조 반영
-    - retrieved_modules_json으로 실제 모듈 내용 재조합 (assemble_curriculum과 동일 방식)
+    CoT 2단계로 제안서 재작성.
+    1단계: 피드백 분석 → 변경 계획 수립 (CoT)
+    2단계: 변경 계획 + 모듈 DB → 완전 재작성
+    반환: (cot_text, improved_proposal)
     """
     total_h = int(duration)
     total_minutes = total_h * 60
 
-    # ── 피드백 지시 섹션 구성 ──
-    improvement_prompt = review_result.get("개선_지시문", "")
+    # 피드백 텍스트 정리
+    review_instruction = review_result.get("개선_지시문", "")
     issues   = "\n".join([f"- {i}" for i in review_result.get("개선_필요", [])])
     critical = "\n".join([f"- {i}" for i in review_result.get("즉시_수정_필요", [])])
 
-    if user_opinion.strip() and improvement_prompt:
-        feedback_section = f"""## ⭐ 최우선 수정 지시 (사용자 직접 요청 — 반드시 100% 반영)
-{user_opinion.strip()}
-
-## 검수자 보완 의견 (위 지시와 충돌하지 않는 범위에서 반영)
-{improvement_prompt}
-{f"### 개선 필요{chr(10)}{issues}" if issues else ""}
-{f"### 즉시 수정{chr(10)}{critical}" if critical else ""}"""
-    elif user_opinion.strip():
-        feedback_section = f"""## ⭐ 최우선 수정 지시 (사용자 직접 요청 — 반드시 100% 반영)
-{user_opinion.strip()}"""
+    if user_opinion.strip():
+        feedback_input = f"[사용자 직접 요청]\n{user_opinion.strip()}"
+        if review_instruction:
+            feedback_input += f"\n\n[AI 검수 결과 — 참고]\n{review_instruction}"
+            if issues:
+                feedback_input += f"\n개선 필요: {issues}"
+            if critical:
+                feedback_input += f"\n즉시 수정: {critical}"
     else:
-        feedback_section = f"""## 검수자 피드백 (반드시 모두 반영)
-{improvement_prompt}
-{f"### 개선 필요{chr(10)}{issues}" if issues else ""}
-{f"### 즉시 수정{chr(10)}{critical}" if critical else ""}"""
+        feedback_input = f"[AI 검수 결과]\n{review_instruction}"
+        if issues:
+            feedback_input += f"\n개선 필요: {issues}"
+        if critical:
+            feedback_input += f"\n즉시 수정: {critical}"
 
-    # ── 모듈 DB 섹션 구성 (assemble_curriculum과 동일) ──
+    # 모듈 DB 텍스트 정리 (간결하게 — CoT 단계에 과하게 넣지 않음)
+    module_names = ""
+    if retrieved_modules_json:
+        try:
+            mods = json.loads(retrieved_modules_json)
+            names = [m.get("모듈명", "") for m in mods if m.get("모듈명")]
+            module_names = ", ".join(names[:20])
+        except Exception:
+            module_names = ""
+
+    # ── 1단계: CoT — 변경 계획 수립 ──
+    cot_prompt = f"""당신은 시니어 HRD 컨설턴트입니다.
+아래 피드백과 기존 제안서를 분석하여, 제안서를 어떻게 개선할지 구체적인 변경 계획을 수립하세요.
+계획만 작성하고 제안서는 아직 작성하지 마세요.
+
+## 수정 피드백
+{feedback_input}
+
+## 고객 니즈
+- 교육 대상: {needs_json.get('target')} | 산업: {needs_json.get('industry')} | {total_h}H
+- 핵심 키워드: {', '.join(needs_json.get('core_keywords', []))}
+- 문제점: {needs_json.get('pain_point')}
+- 기대 행동 변화: {needs_json.get('expected_behavior')}
+
+## 활용 가능한 모듈 목록
+{module_names if module_names else "(모듈 목록 없음 — 기존 제안서 내용 기반으로 개선)"}
+
+## 기존 제안서 요약
+{original_proposal[:2000]}{"... (이하 생략)" if len(original_proposal) > 2000 else ""}
+
+---
+
+아래 양식으로 변경 계획을 작성하세요:
+
+## 💭 재작성 사고 과정
+
+### 1. 피드백 핵심 파악
+- 사용자/검수자가 요청한 핵심 변경 사항은 무엇인가?
+- (각 요청을 1줄씩 정리)
+
+### 2. 현재 제안서 문제점 진단
+- 기존 제안서에서 피드백 기준으로 부족한 부분은?
+- (구체적으로 모듈명·항목 언급)
+
+### 3. 변경 계획
+- **삭제/교체할 모듈 또는 내용:** (이유 포함)
+- **추가/강화할 모듈 또는 내용:** (이유 포함)
+- **구조 변경:** (필요한 경우)
+
+### 4. 재작성 후 기대 결과
+- 피드백이 어떻게 반영되었는지 1~2문장으로 예고
+"""
+
+    cot_text = ""
+    for attempt in range(3):
+        try:
+            resp = client_genai.models.generate_content(model=MODEL_NAME, contents=cot_prompt)
+            cot_text = resp.text
+            break
+        except Exception as e:
+            if "429" in str(e) and attempt < 2:
+                time.sleep(60 * (attempt + 1))
+            else:
+                cot_text = f"(사고 과정 생성 실패: {e})"
+                break
+
+    # 모듈 DB 전체 내용 (2단계 재작성용)
     modules_section = ""
     if retrieved_modules_json:
         modules_section = f"""
-## ⭐ [RAG] 검색된 교육 모듈 (이 모듈 내용을 레고 블록처럼 재조합하여 사용)
-아래 모듈들의 "내용_원문"에서 구체적인 활동을 추출하여 커리큘럼에 반영하세요.
-이 목록에 없는 새로운 활동을 창작하지 마세요.
-
+## 검색된 교육 모듈 (내용_원문에서 활동을 추출해 커리큘럼에 활용)
 ```json
 {retrieved_modules_json}
 ```
 """
     elif grouped_modules:
-        def fmt(mods, limit=5):
+        def _fmt(mods, limit=5):
             out = []
             for m in mods[:limit]:
                 meta = m["meta"]
-                out.append(f"- [{meta.get('과정명','')}] {meta.get('모듈명','')}\n  내용: {meta.get('내용_원문','')[:150]}")
+                out.append(f"- [{meta.get('과정명','')}] {meta.get('모듈명','')}: {meta.get('내용_원문','')[:120]}")
             return "\n".join(out) if out else "없음"
         modules_section = f"""
-## 참고 교육 모듈
-### 도입: {fmt(grouped_modules.get('intro', []))}
-### 핵심: {fmt(grouped_modules.get('core', []), 8)}
-### 적용: {fmt(grouped_modules.get('apply', []))}
+## 교육 모듈 참고
+도입: {_fmt(grouped_modules.get('intro',[]))}
+핵심: {_fmt(grouped_modules.get('core',[]),8)}
+적용: {_fmt(grouped_modules.get('apply',[]))}
 """
 
-    prompt = f"""당신은 10년 경력의 시니어 HRD 컨설턴트입니다.
-아래 수정 지시와 교육 모듈을 바탕으로, 기존 제안서를 **처음부터 완전히 재작성**하세요.
-단순 편집이 아니라, 수정 지시를 완전히 반영한 새 제안서를 생성하는 것이 목표입니다.
+    # ── 2단계: 변경 계획 기반 완전 재작성 ──
+    rewrite_prompt = f"""당신은 시니어 HRD 컨설턴트입니다.
+아래 변경 계획을 100% 실행하여, 교육 제안서를 처음부터 완전히 재작성하세요.
 
-{feedback_section}
+## ⭐ 변경 계획 (반드시 그대로 실행)
+{cot_text}
 
-## 고객 니즈 (재분석 기준)
-- 교육 대상: {needs_json.get('target')}
-- 산업군: {needs_json.get('industry')}
+## 수정 피드백 (재확인)
+{feedback_input}
+
+## 고객 니즈
+- 교육 대상: {needs_json.get('target')} | 산업: {needs_json.get('industry')}
 - 핵심 키워드: {', '.join(needs_json.get('core_keywords', []))}
-- 현재 문제점: {needs_json.get('pain_point')}
+- 문제점: {needs_json.get('pain_point')}
 - 기대 행동 변화: {needs_json.get('expected_behavior')}
 - 교육 시간: {total_h}H (= {total_minutes}분)
 {modules_section}
-## 기존 제안서 (참고용 — 수정 지시가 우선)
-{original_proposal}
-
----
-
-## 재작성 지침
-
-### [포맷팅 절대 규칙]
-- 마크다운 표(table) 사용 절대 금지
+## 재작성 규칙
+- 마크다운 표(table) 절대 금지
 - 각 모듈당 세부 항목 5개 이상
 - 각 모듈에 [토의]/[실습]/[롤플레잉]/[워크샵]/[사례분석] 중 하나 이상
-- 시간 표기: `60~90분 (제안)` 형태의 범위
+- 시간 표기: `60~90분 (제안)` 형태
+- 내용 축소 절대 금지
 
-### [재작성 원칙]
-1. 수정 지시 사항을 최우선으로 반영하여 처음부터 다시 씁니다.
-2. 교육 모듈이 제공된 경우, 해당 모듈의 실제 내용("내용_원문")을 활용합니다.
-3. 기존 제안서의 좋은 부분은 유지하되, 수정 지시와 충돌하면 지시를 따릅니다.
-4. 내용 축소 절대 금지 — 각 모듈당 최소 5개 이상의 구체적 세부 내용을 작성합니다.
-
-반드시 아래 양식으로 완성된 제안서를 작성하세요:
+반드시 아래 양식으로 작성하세요:
 
 ---
 
@@ -1259,18 +1311,19 @@ def improve_proposal(original_proposal: str, review_result: dict,
 
 (모듈은 교육 시간에 따라 자유롭게 추가. 표 사용 절대 금지)"""
 
+    improved = ""
     for attempt in range(3):
         try:
-            response = client_genai.models.generate_content(
-                model=MODEL_NAME,
-                contents=prompt
-            )
-            return response.text
+            resp = client_genai.models.generate_content(model=MODEL_NAME, contents=rewrite_prompt)
+            improved = resp.text
+            break
         except Exception as e:
             if "429" in str(e) and attempt < 2:
                 time.sleep(60 * (attempt + 1))
             else:
                 raise e
+
+    return cot_text, improved
 
 
 
@@ -1336,6 +1389,7 @@ _DEFAULTS = {
     "remaining_placeholders": [],
     "curriculum_timing": None,
     "review": None,
+    "improve_cot": None,
     "improved_proposal": None,
     # A/B 초안
     "ab_cot": None,
@@ -1964,22 +2018,30 @@ if current_step >= 4 and st.session_state.proposal:
             st.session_state.review if _has_valid_review
             else {"개선_지시문": "", "개선_필요": [], "즉시_수정_필요": []}
         )
-        with st.spinner("✍️ 제안서 재작성 중..."):
-            improved = improve_proposal(
-                st.session_state.improved_proposal or proposal,
-                _review_for_improve,
-                nj,
-                duration,
-                user_opinion=user_opinion,
-                retrieved_modules_json=st.session_state.retrieved_modules_json,
-                grouped_modules=st.session_state.grouped,
-            )
+        _prog6 = st.progress(0, text="💭 피드백 분석 및 변경 계획 수립 중...")
+        cot_result, improved = improve_proposal(
+            st.session_state.improved_proposal or proposal,
+            _review_for_improve,
+            nj,
+            duration,
+            user_opinion=user_opinion,
+            retrieved_modules_json=st.session_state.retrieved_modules_json,
+            grouped_modules=st.session_state.grouped,
+        )
+        _prog6.progress(80, text="✍️ 변경 계획 기반 제안서 재작성 중...")
         improved = re.sub(r'<br\s*/?>', '\n- ', improved)
         improved = re.sub(r'<[^>]+>', '', improved)
         improved, _ = replace_placeholders(improved, company_name)
+        _prog6.progress(100, text="✅ 완료!")
+        time.sleep(0.3)
+        _prog6.empty()
+        st.session_state.improve_cot = cot_result
         st.session_state.improved_proposal = improved
 
     if st.session_state.improved_proposal:
+        if st.session_state.improve_cot:
+            with st.expander("💭 AI 재작성 사고 과정", expanded=False):
+                st.markdown(st.session_state.improve_cot)
         st.success("✅ 재작성된 제안서입니다.")
         st.markdown(st.session_state.improved_proposal)
         st.divider()
