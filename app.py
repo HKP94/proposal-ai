@@ -464,14 +464,17 @@ def search_modules_detailed(collection, needs_json, db_type):
     retrieved_modules = []
     if db_type == "module":
         for idx, doc_id in enumerate(top_ids):
+            sim = id_to_sim[doc_id]
+            if sim < 70:  # 유사도 70% 미만 제외
+                continue
             meta = id_to_meta[doc_id]
             retrieved_modules.append({
-                "rank": idx + 1,
-                "similarity_percent": id_to_sim[doc_id],
+                "rank": len(retrieved_modules) + 1,
+                "similarity_percent": sim,
                 "모듈명":       meta.get("모듈명", ""),
                 "과정명":       meta.get("과정명", ""),
-                "세부주제목록": meta.get("세부주제목록", ""),
-                "세부내용요약": meta.get("세부내용요약", ""),
+                "교육목표":     meta.get("교육목표", ""),
+                "내용_원문":    meta.get("내용_원문", ""),
                 "권장시간":     meta.get("권장시간", ""),
                 "교육방식":     meta.get("교육방식", ""),
                 "모듈성격":     meta.get("모듈성격", "core"),
@@ -480,11 +483,14 @@ def search_modules_detailed(collection, needs_json, db_type):
         # 구버전 폴백: 단일 쿼리
         raw = collection.query(query_embeddings=[embeddings[0]], n_results=min(20, collection.count()))
         for idx, (meta, dist) in enumerate(zip(raw["metadatas"][0], raw["distances"][0])):
+            sim = round((1 - dist) * 100, 1)
+            if sim < 70:
+                continue
             retrieved_modules.append({
-                "rank": idx + 1,
-                "similarity_percent": round((1 - dist) * 100, 1),
+                "rank": len(retrieved_modules) + 1,
+                "similarity_percent": sim,
                 "과정명":       meta.get("과정명", ""),
-                "세부내용요약": meta.get("세부내용요약", ""),
+                "내용_원문":    meta.get("내용_원문", ""),
                 "권장시간":     meta.get("권장시간", ""),
             })
 
@@ -615,8 +621,8 @@ def assemble_curriculum(needs_json, grouped_modules, duration, retrieved_modules
         for m in modules[:limit]:
             meta = m["meta"]
             name = meta.get("모듈명", "")
-            topics = meta.get("세부주제목록", "")
-            content = meta.get("세부내용요약", "")[:150]
+            topics = meta.get("교육목표", "")
+            content = meta.get("내용_원문", "")[:150]
             course = meta.get("과정명", "")
             sim = m["similarity"]
             out.append(f"- [{course}] {name}\n  주제: {topics}\n  내용: {content}\n  유사도: {sim}%")
@@ -629,9 +635,9 @@ def assemble_curriculum(needs_json, grouped_modules, duration, retrieved_modules
     # [P0-B] retrieved_modules_json이 없으면 이전 방식으로 폴백
     if not retrieved_modules_json:
         retrieved_modules_json = json.dumps([
-            {"모듈명": intro_list, "세부내용요약": "도입 모듈"},
-            {"모듈명": core_list, "세부내용요약": "핵심 모듈"},
-            {"모듈명": apply_list, "세부내용요약": "현업 적용 모듈"}
+            {"모듈명": intro_list, "내용_원문": "도입 모듈"},
+            {"모듈명": core_list, "내용_원문": "핵심 모듈"},
+            {"모듈명": apply_list, "내용_원문": "현업 적용 모듈"}
         ], ensure_ascii=False, indent=2)
 
     # [PM] 사용자 선택 모듈 섹션 생성
@@ -648,7 +654,7 @@ def assemble_curriculum(needs_json, grouped_modules, duration, retrieved_modules
 
 ### 선택 모듈 우선 순위 규칙
 1. 위 선택된 모듈들은 100% 커리큘럼에 포함합니다 (생략 불가).
-2. 선택된 모듈의 "세부내용요약"에서 구체적 활동을 추출하여 그대로 사용합니다.
+2. 선택된 모듈의 "내용_원문"에서 구체적 활동을 추출하여 그대로 사용합니다.
 3. 남은 시간은 아래 Retrieved Modules에서 가장 적합한 모듈로 채웁니다.
 """
     else:
@@ -712,9 +718,9 @@ def assemble_curriculum(needs_json, grouped_modules, duration, retrieved_modules
 
 ### [P0-B] Hard-Binding RAG 규칙 (100% 강제)
 1. **절대 금지**: 위 "Retrieved Modules" 목록에 없는 활동을 추가하지 마세요.
-2. **레고 블록 조립**: 각 모듈의 "세부내용요약"에서 구체적인 활동(진단, 롤플레이, 토의 등)을 추출하여 그대로 사용하세요.
+2. **레고 블록 조립**: 각 모듈의 "내용_원문"에서 구체적인 활동(진단, 롤플레이, 토의 등)을 추출하여 그대로 사용하세요.
 3. **시간 참고**: 각 모듈의 "권장시간"은 참고 기준입니다. 풍부한 내용 제공을 위해 시간이 다소 초과되더라도 내용을 축소하거나 활동을 삭제하지 마세요.
-4. **충분한 내용**: 각 모듈당 최소 5~8개의 풍부한 세부 항목을 원본 JSON의 "세부내용요약"에서 가져와 표 형식으로 구성하세요.
+4. **충분한 내용**: 각 모듈당 최소 5~8개의 풍부한 세부 항목을 원본 JSON의 "내용_원문"에서 가져와 표 형식으로 구성하세요.
 
 ### [P0-2] RAG 강제 인용 규칙 (80% 이상)
 1. **"검색된 교육 모듈 풀"의 모듈들의 구체적 활동을 반드시 80% 이상 커리큘럼에 인용하세요.**
@@ -1343,8 +1349,8 @@ if current_step >= 3 and st.session_state.retrieved_modules:
             mod_name   = mod.get("모듈명", f"모듈 {i+1}")
             course     = mod.get("과정명", "")
             sim        = mod.get("similarity_percent", 0)
-            topics     = mod.get("세부주제목록", "")
-            content    = mod.get("세부내용요약", "")
+            topics     = mod.get("교육목표", "")
+            content    = mod.get("내용_원문", "")
             rec_time   = mod.get("권장시간", "")
             edu_type   = mod.get("교육방식", "")
             char       = mod.get("모듈성격", "core")
