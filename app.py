@@ -762,14 +762,6 @@ def assemble_curriculum(needs_json, grouped_modules, duration, retrieved_modules
 
 ---
 
-## 🎯 교육 목표
-교육 종료 후 참가자는 다음을 할 수 있습니다:
-1. (블룸의 분류학: 인식/이해 수준) ~의 중요성을 인식하고 설명할 수 있다
-2. (블룸의 분류학: 적용 수준) ~스킬을 현업 상황에 적용할 수 있다
-3. (블룸의 분류학: 분석/평가 수준) ~을 기준으로 분석하고 개선안을 도출할 수 있다
-
----
-
 ## 📚 상세 커리큘럼
 
 (아래 양식을 모듈마다 반복. 마크다운 표(table)는 절대 사용 금지)
@@ -794,20 +786,6 @@ def assemble_curriculum(needs_json, grouped_modules, duration, retrieved_modules
   - [롤플레잉] 시나리오명 및 역할 구성 (대괄호 필수)
 
 (모듈은 교육 시간에 따라 자유롭게 추가. 표 사용 절대 금지)
-
----
-
-## 💡 기대 효과
-
-### 조직 관점
-(조직 차원에서 기대되는 변화 2~3문장)
-
-### 개인 관점
-(개인 구성원 차원에서 기대되는 성장 2~3문장)
-
----
-*본 제안서는 고객사의 요구사항을 반영하여 작성된 맞춤형 초안입니다.*
-*담당: [담당 컨설턴트명] | 문의: [연락처]*
 """
 
     # [Sprint 2-2] 고도화 모드: 조직 맥락 컨텍스트 + 추가 섹션 강제
@@ -900,6 +878,111 @@ def assemble_curriculum(needs_json, grouped_modules, duration, retrieved_modules
     st.session_state.curriculum_timing = timing_result
 
     return last_curriculum, timing_result
+
+
+# ============ A/B 초안 생성 (CoT) ============
+def assemble_curriculum_ab(needs_json, retrieved_modules_json, duration, selected_modules=None):
+    """
+    CoT 방식으로 서로 다른 교육 철학의 A안·B안 설계안을 한 번에 생성.
+    반환: (cot_text, draft_a, draft_b)
+    - cot_text : AI 설계 사고 과정
+    - draft_a  : A안 모듈 구성 요약
+    - draft_b  : B안 모듈 구성 요약
+    """
+    total_h = int(duration)
+    target   = needs_json.get("target", "")
+    keywords = ", ".join(needs_json.get("core_keywords", []))
+    pain     = needs_json.get("pain_point", "")
+    behavior = needs_json.get("expected_behavior", "")
+
+    sel_note = ""
+    if selected_modules:
+        names = [m.get("모듈명", "") for m in selected_modules]
+        sel_note = f"\n⚠️ 아래 모듈은 사용자가 선택한 필수 포함 모듈입니다: {', '.join(names)}\n"
+
+    prompt = f"""당신은 시니어 HRD 컨설턴트입니다.
+아래 교육 니즈와 모듈을 분석하여, 서로 다른 교육 철학의 커리큘럼 A안과 B안을 설계하세요.
+
+## 교육 니즈
+- 교육 대상: {target}
+- 핵심 키워드: {keywords}
+- 문제점: {pain}
+- 기대 행동 변화: {behavior}
+- 교육 시간: {total_h}H
+{sel_note}
+## 검색된 교육 모듈 (이 모듈만 사용)
+```json
+{retrieved_modules_json}
+```
+
+## 작성 규칙
+- 두 안은 서로 다른 교육 철학·구성 순서를 가져야 함 (단순 모듈 순서 변경 X)
+- 각 안에서 모듈은 검색된 목록에서만 선택
+- 반드시 아래 구분자를 정확히 사용
+
+---DRAFT_A_START---
+# A안: [방향명 4~6글자]
+
+**설계 방향:** (이 안의 교육 철학을 1~2문장으로)
+
+## 모듈 구성 ({total_h}H)
+1. **[모듈명]** (XX~XX분) — [핵심 활동 1가지]
+2. **[모듈명]** (XX~XX분) — [핵심 활동 1가지]
+(총 {total_h}H에 맞게 모듈 구성)
+
+**이 안의 특징:** (A안을 선택하면 좋은 상황 1~2문장)
+---DRAFT_A_END---
+
+---DRAFT_B_START---
+# B안: [방향명 4~6글자]
+
+**설계 방향:** (이 안의 교육 철학을 1~2문장으로)
+
+## 모듈 구성 ({total_h}H)
+1. **[모듈명]** (XX~XX분) — [핵심 활동 1가지]
+2. **[모듈명]** (XX~XX분) — [핵심 활동 1가지]
+(총 {total_h}H에 맞게 모듈 구성)
+
+**이 안의 특징:** (B안을 선택하면 좋은 상황 1~2문장)
+---DRAFT_B_END---
+
+위 형식으로 작성하기 전에, 먼저 아래 설계 사고를 작성하세요:
+
+## 💭 AI 설계 사고 과정
+- **핵심 니즈 해석:** (이 교육에서 가장 중요한 것은?)
+- **A안 방향:** (예: 이론→스킬→실습 단계 심화형)
+- **B안 방향:** (예: 현업 문제 중심 경험학습형)
+"""
+
+    try:
+        resp = client_genai.models.generate_content(model=MODEL_NAME, contents=prompt)
+        text = resp.text
+
+        # CoT 파싱
+        cot_text = ""
+        if "## 💭 AI 설계 사고 과정" in text:
+            cot_start = text.index("## 💭 AI 설계 사고 과정")
+            cot_end   = text.index("---DRAFT_A_START---") if "---DRAFT_A_START---" in text else len(text)
+            cot_text  = text[cot_start:cot_end].strip()
+
+        # A안 파싱
+        draft_a = ""
+        if "---DRAFT_A_START---" in text and "---DRAFT_A_END---" in text:
+            a_start = text.index("---DRAFT_A_START---") + len("---DRAFT_A_START---")
+            a_end   = text.index("---DRAFT_A_END---")
+            draft_a = text[a_start:a_end].strip()
+
+        # B안 파싱
+        draft_b = ""
+        if "---DRAFT_B_START---" in text and "---DRAFT_B_END---" in text:
+            b_start = text.index("---DRAFT_B_START---") + len("---DRAFT_B_START---")
+            b_end   = text.index("---DRAFT_B_END---")
+            draft_b = text[b_start:b_end].strip()
+
+        return cot_text, draft_a, draft_b
+
+    except Exception as e:
+        raise Exception(f"A/B 초안 생성 실패: {e}")
 
 
 # ============ 검수자 AI ============
@@ -1095,6 +1178,12 @@ _DEFAULTS = {
     "curriculum_timing": None,
     "review": None,
     "improved_proposal": None,
+    # A/B 초안
+    "ab_cot": None,
+    "ab_draft_a": None,
+    "ab_draft_b": None,
+    "ab_selected": "A",
+    "ab_feedback": "",
 }
 for _k, _v in _DEFAULTS.items():
     if _k not in st.session_state:
@@ -1426,50 +1515,100 @@ if current_step >= 3 and st.session_state.retrieved_modules:
 
         st.divider()
 
-        if st.button(
-            "🚀 제안서 생성",
-            type="primary",
-            use_container_width=True,
-            key="step3_generate"
-        ):
-            final_sel_idx = [i for i in range(len(r_mods)) if st.session_state.get(f"mod_sel_{i}", False)]
-            st.session_state.selected_modules = final_sel_idx
-            sel_details = [r_mods[i] for i in final_sel_idx]
-            track = st.session_state.generation_track
-            adv_ctx = st.session_state.advanced_context if track == "advanced" else None
+        # ── A/B 초안 생성 버튼 ──
+        if not st.session_state.ab_draft_a:
+            if st.button("🧠 A/B 커리큘럼 초안 생성", type="primary", use_container_width=True, key="step3_ab"):
+                final_sel_idx = [i for i in range(len(r_mods)) if st.session_state.get(f"mod_sel_{i}", False)]
+                st.session_state.selected_modules = final_sel_idx
+                sel_details = [r_mods[i] for i in final_sel_idx]
+                with st.spinner("💭 AI가 두 가지 커리큘럼 방향을 설계하는 중..."):
+                    cot, draft_a, draft_b = assemble_curriculum_ab(
+                        st.session_state.needs_json,
+                        st.session_state.retrieved_modules_json,
+                        duration,
+                        sel_details if sel_details else None,
+                    )
+                st.session_state.ab_cot     = cot
+                st.session_state.ab_draft_a = draft_a
+                st.session_state.ab_draft_b = draft_b
+                st.rerun()
 
-            # [로드맵] 모크 프로그레스 바
-            _prog = st.progress(0, text="🔍 고객 니즈 확인 중...")
-            _prog.progress(15, text="📚 관련 모듈 검색 중...")
-            _prog.progress(35, text="✍️ 커리큘럼 조합 중..." + (" (고도화 모드)" if track == "advanced" else ""))
+        # ── A/B 선택 UI ──
+        if st.session_state.ab_draft_a:
+            if st.session_state.ab_cot:
+                with st.expander("💭 AI 설계 사고 과정", expanded=False):
+                    st.markdown(st.session_state.ab_cot)
 
-            proposal, timing_result = assemble_curriculum(
-                st.session_state.needs_json,
-                st.session_state.grouped,
-                duration,
-                st.session_state.retrieved_modules_json,
-                sel_details if sel_details else None,
-                track=track,
-                advanced_context=adv_ctx,
+            st.markdown("#### 두 가지 커리큘럼 방향 중 선택하세요")
+            tab_a, tab_b = st.tabs(["📘 A안", "📗 B안"])
+            with tab_a:
+                st.markdown(st.session_state.ab_draft_a)
+            with tab_b:
+                st.markdown(st.session_state.ab_draft_b)
+
+            ab_choice = st.radio(
+                "선택",
+                ["A안", "B안"],
+                index=0 if st.session_state.ab_selected == "A" else 1,
+                horizontal=True,
+                key="ab_radio",
+                label_visibility="collapsed",
             )
+            st.session_state.ab_selected = "A" if ab_choice == "A안" else "B"
 
-            _prog.progress(90, text="🔍 품질 검증 중...")
-            _prog.progress(100, text="✅ 완료!")
-            time.sleep(0.4)
-            _prog.empty()
+            ab_feedback = st.text_area(
+                "✏️ 피드백 / 수정 요청 (선택)",
+                placeholder="예: A안을 기반으로 하되 3모듈에 사례 분석을 추가해주세요. 실습 비중을 늘려주세요.",
+                height=80,
+                key="ab_feedback_input",
+            )
+            st.session_state.ab_feedback = ab_feedback
 
-            # HTML 태그 정규화 클렌징
-            proposal = re.sub(r'<br\s*/?>', '\n- ', proposal)
-            proposal = re.sub(r'<[^>]+>', '', proposal)
+            col_reset, col_gen = st.columns([1, 3])
+            with col_reset:
+                if st.button("↩️ 다시 생성", use_container_width=True, key="ab_reset"):
+                    st.session_state.ab_draft_a = None
+                    st.session_state.ab_draft_b = None
+                    st.session_state.ab_cot     = None
+                    st.rerun()
+            with col_gen:
+                if st.button("🚀 최종 제안서 생성", type="primary", use_container_width=True, key="step3_generate"):
+                    sel_details = [r_mods[i] for i in st.session_state.selected_modules] if st.session_state.selected_modules else None
+                    track  = st.session_state.generation_track
+                    adv_ctx = st.session_state.advanced_context if track == "advanced" else {}
 
-            # Placeholder 치환
-            proposal, rem_ph = replace_placeholders(proposal, company_name)
+                    selected_draft = st.session_state.ab_draft_a if st.session_state.ab_selected == "A" else st.session_state.ab_draft_b
+                    adv_ctx["선택된_커리큘럼_방향"] = selected_draft
+                    if st.session_state.ab_feedback.strip():
+                        adv_ctx["사용자_피드백"] = st.session_state.ab_feedback
 
-            st.session_state.proposal = proposal
-            st.session_state.curriculum_timing = timing_result
-            st.session_state.remaining_placeholders = rem_ph
-            st.session_state.workflow_step = 4
-            st.rerun()
+                    _prog = st.progress(0, text="✍️ 선택한 방향으로 최종 제안서 작성 중...")
+                    _prog.progress(40, text="✍️ 커리큘럼 세부 내용 작성 중...")
+
+                    proposal, timing_result = assemble_curriculum(
+                        st.session_state.needs_json,
+                        st.session_state.grouped,
+                        duration,
+                        st.session_state.retrieved_modules_json,
+                        sel_details,
+                        track="advanced",
+                        advanced_context=adv_ctx,
+                    )
+
+                    _prog.progress(90, text="🔍 품질 검증 중...")
+                    _prog.progress(100, text="✅ 완료!")
+                    time.sleep(0.3)
+                    _prog.empty()
+
+                    proposal = re.sub(r'<br\s*/?>', '\n- ', proposal)
+                    proposal = re.sub(r'<[^>]+>', '', proposal)
+                    proposal, rem_ph = replace_placeholders(proposal, company_name)
+
+                    st.session_state.proposal = proposal
+                    st.session_state.curriculum_timing = timing_result
+                    st.session_state.remaining_placeholders = rem_ph
+                    st.session_state.workflow_step = 4
+                    st.rerun()
 
     else:
         sel_idx_done = st.session_state.selected_modules
