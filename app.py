@@ -789,39 +789,14 @@ def assemble_curriculum(needs_json, grouped_modules, duration, retrieved_modules
 """
 
     # [Sprint 2-2] 고도화 모드: 조직 맥락 컨텍스트 + 추가 섹션 강제
-    if track == "advanced" and advanced_context:
-        adv_filled = {k: v for k, v in advanced_context.items() if v and v.strip()}
+    if advanced_context:
+        adv_filled = {k: v for k, v in advanced_context.items() if v and str(v).strip()}
         if adv_filled:
             ctx_lines = "\n".join(f"- {k}: {v}" for k, v in adv_filled.items())
             prompt = f"""[조직 맞춤화 컨텍스트 — 반드시 커리큘럼에 반영하세요]
 {ctx_lines}
 
 """ + prompt
-
-        prompt += """
-
----
-
-## 📌 고도화 전용 추가 섹션 (반드시 아래 3개 섹션을 제안서 하단에 작성)
-
-### 6. 조직 맥락 반영
-(위 [조직 맞춤화 컨텍스트]의 기업 문화·현황을 커리큘럼 설계에 반영한 근거를 2~3문장으로 서술)
-
-### 7. 학습 전이(Learning Transfer) 플랜
-| 단계 | 시점 | 활동 내용 |
-|------|------|-----------|
-| 사전 진단 | 교육 2주 전 | (진단 도구 및 방법) |
-| 현업 적용 과제 | 교육 직후 | (Action Learning 과제) |
-| 사후 Follow-up | 교육 4~8주 후 | (코칭·점검 방식) |
-
-### 8. ROI 및 평가 방안
-| 평가 단계 | Kirkpatrick 수준 | 측정 지표 | 측정 방법 |
-|-----------|------------------|-----------|-----------|
-| 반응 | Level 1 | 만족도 점수 | 교육 종료 후 설문 |
-| 학습 | Level 2 | 사전·사후 역량 변화 | 진단지 점수 비교 |
-| 행동 | Level 3 | 현업 적용률 | 상사 관찰 / 자기 보고 |
-| 결과 | Level 4 | 팀 성과 지표 변화 | (구체적 KPI 명시) |
-"""
 
     # [P1] Self-Correction 루프: 최대 3회 시도 (첫 생성 + 최대 2회 재생성)
     MAX_QUALITY_ATTEMPTS = 3
@@ -880,17 +855,18 @@ def assemble_curriculum(needs_json, grouped_modules, duration, retrieved_modules
     return last_curriculum, timing_result
 
 
-# ============ A/B 초안 생성 (CoT) ============
+# ============ A/B 완성 제안서 생성 (CoT) ============
 def assemble_curriculum_ab(needs_json, retrieved_modules_json, duration, selected_modules=None):
     """
-    CoT 방식으로 서로 다른 교육 철학의 A안·B안 설계안을 한 번에 생성.
+    CoT 방식으로 서로 다른 교육 철학의 A안·B안 완성 제안서를 한 번에 생성.
     반환: (cot_text, draft_a, draft_b)
     - cot_text : AI 설계 사고 과정
-    - draft_a  : A안 모듈 구성 요약
-    - draft_b  : B안 모듈 구성 요약
+    - draft_a  : A안 완성 제안서 (과정 개요 + 상세 커리큘럼)
+    - draft_b  : B안 완성 제안서 (과정 개요 + 상세 커리큘럼)
     """
     total_h = int(duration)
     target   = needs_json.get("target", "")
+    industry = needs_json.get("industry", "")
     keywords = ", ".join(needs_json.get("core_keywords", []))
     pain     = needs_json.get("pain_point", "")
     behavior = needs_json.get("expected_behavior", "")
@@ -900,11 +876,41 @@ def assemble_curriculum_ab(needs_json, retrieved_modules_json, duration, selecte
         names = [m.get("모듈명", "") for m in selected_modules]
         sel_note = f"\n⚠️ 아래 모듈은 사용자가 선택한 필수 포함 모듈입니다: {', '.join(names)}\n"
 
+    proposal_format = f"""# 맞춤 교육 제안서
+
+## 📋 과정 개요
+* **과정명:** (창의적이고 전문적인 과정명)
+* **교육 대상:** {target}
+* **교육 목적:** (개괄식으로 2개 작성)
+* **교육 시간:** {total_h}H
+* **교육 방식:** (강의형/실습형/워크샵형 중 선택)
+
+---
+
+## 📚 상세 커리큘럼
+
+(아래 양식을 모듈마다 반복. 마크다운 표(table)는 절대 사용 금지)
+
+### 1. [모듈 주제명] (60~90분 제안)
+- 주요 학습 내용 요약 (1~2문장)
+  - 세부 상세 내용 1
+  - 세부 상세 내용 2
+  - 세부 상세 내용 3
+  - 세부 상세 내용 4
+  - 세부 상세 내용 5
+  - [실습/토의/롤플레잉] 구체적 활동명 및 실행 방법 (대괄호 필수)
+
+### 2. [모듈 주제명] (60~90분 제안)
+...
+
+(모듈은 교육 시간에 따라 자유롭게 추가. 표 사용 절대 금지)"""
+
     prompt = f"""당신은 시니어 HRD 컨설턴트입니다.
-아래 교육 니즈와 모듈을 분석하여, 서로 다른 교육 철학의 커리큘럼 A안과 B안을 설계하세요.
+아래 교육 니즈와 모듈을 분석하여, 서로 다른 교육 철학의 완성된 교육 제안서 A안과 B안을 작성하세요.
 
 ## 교육 니즈
 - 교육 대상: {target}
+- 산업군: {industry}
 - 핵심 키워드: {keywords}
 - 문제점: {pain}
 - 기대 행동 변화: {behavior}
@@ -918,40 +924,29 @@ def assemble_curriculum_ab(needs_json, retrieved_modules_json, duration, selecte
 ## 작성 규칙
 - 두 안은 서로 다른 교육 철학·구성 순서를 가져야 함 (단순 모듈 순서 변경 X)
 - 각 안에서 모듈은 검색된 목록에서만 선택
+- 각 모듈당 최소 5개 이상의 구체적 세부 내용 포함
+- 마크다운 표(table) 사용 절대 금지
+- 각 모듈에 [토의]/[실습]/[롤플레잉]/[워크샵]/[사례분석] 중 하나 이상 포함
+- 시간 표기는 범위 형태로 (예: 60~90분 제안)
 - 반드시 아래 구분자를 정확히 사용
 
----DRAFT_A_START---
-# A안: [방향명 4~6글자]
-
-**설계 방향:** (이 안의 교육 철학을 1~2문장으로)
-
-## 모듈 구성 ({total_h}H)
-1. **[모듈명]** (XX~XX분) — [핵심 활동 1가지]
-2. **[모듈명]** (XX~XX분) — [핵심 활동 1가지]
-(총 {total_h}H에 맞게 모듈 구성)
-
-**이 안의 특징:** (A안을 선택하면 좋은 상황 1~2문장)
----DRAFT_A_END---
-
----DRAFT_B_START---
-# B안: [방향명 4~6글자]
-
-**설계 방향:** (이 안의 교육 철학을 1~2문장으로)
-
-## 모듈 구성 ({total_h}H)
-1. **[모듈명]** (XX~XX분) — [핵심 활동 1가지]
-2. **[모듈명]** (XX~XX분) — [핵심 활동 1가지]
-(총 {total_h}H에 맞게 모듈 구성)
-
-**이 안의 특징:** (B안을 선택하면 좋은 상황 1~2문장)
----DRAFT_B_END---
-
-위 형식으로 작성하기 전에, 먼저 아래 설계 사고를 작성하세요:
+먼저 아래 설계 사고를 작성하세요:
 
 ## 💭 AI 설계 사고 과정
 - **핵심 니즈 해석:** (이 교육에서 가장 중요한 것은?)
 - **A안 방향:** (예: 이론→스킬→실습 단계 심화형)
 - **B안 방향:** (예: 현업 문제 중심 경험학습형)
+- **두 안의 차별점:** (A/B를 구분하는 핵심 철학 차이)
+
+그 다음 아래 구분자 형식으로 두 안의 완성된 제안서를 작성하세요:
+
+---DRAFT_A_START---
+{proposal_format}
+---DRAFT_A_END---
+
+---DRAFT_B_START---
+{proposal_format}
+---DRAFT_B_END---
 """
 
     try:
@@ -982,7 +977,108 @@ def assemble_curriculum_ab(needs_json, retrieved_modules_json, duration, selecte
         return cot_text, draft_a, draft_b
 
     except Exception as e:
-        raise Exception(f"A/B 초안 생성 실패: {e}")
+        raise Exception(f"A/B 제안서 생성 실패: {e}")
+
+
+# ============ A/B 통합 최선 제안서 생성 ============
+def combine_ab_proposals(proposal_a, proposal_b, user_opinion, needs_json, duration):
+    """
+    A안·B안 완성 제안서를 비교하여 최선 요소를 통합한 최종 제안서 생성.
+    사용자 의견을 반영하여 AI가 조합.
+    반환: (combined_proposal, timing_result)
+    """
+    total_h = int(duration)
+    total_minutes = total_h * 60
+    target   = needs_json.get("target", "")
+    keywords = ", ".join(needs_json.get("core_keywords", []))
+    pain     = needs_json.get("pain_point", "")
+    behavior = needs_json.get("expected_behavior", "")
+
+    user_opinion_section = ""
+    if user_opinion and user_opinion.strip():
+        user_opinion_section = f"""
+## 💬 사용자 의견 (반드시 반영)
+{user_opinion.strip()}
+"""
+
+    prompt = f"""당신은 10년 경력의 시니어 HRD 컨설턴트입니다.
+아래 두 가지 교육 제안서(A안, B안)를 비교 분석하여, 각 안의 장점을 통합한 최종 완성 제안서를 작성하세요.
+
+## 고객 니즈
+- 교육 대상: {target}
+- 핵심 키워드: {keywords}
+- 현재 문제점: {pain}
+- 기대 행동 변화: {behavior}
+- 교육 시간: {total_h}H (= {total_minutes}분)
+{user_opinion_section}
+## A안 제안서
+{proposal_a}
+
+## B안 제안서
+{proposal_b}
+
+## 작성 지침
+
+### [통합 원칙]
+1. A안과 B안 각각의 강점을 분석하고, 더 우수한 요소를 선택하거나 조합하세요.
+2. 사용자 의견이 있다면 최우선으로 반영하세요.
+3. 두 안의 단순 합산이 아니라, 진정으로 최선의 커리큘럼을 설계하세요.
+4. 중복되는 모듈은 더 풍부한 내용을 가진 쪽을 채택하세요.
+
+### [포맷팅 규칙]
+- 마크다운 표(table) 사용 절대 금지
+- 각 모듈당 최소 5개 이상의 구체적 세부 내용 포함
+- 각 모듈에 [토의]/[실습]/[롤플레잉]/[워크샵]/[사례분석] 중 하나 이상 포함
+- 시간 표기는 범위 형태로 (예: 60~90분 제안)
+
+반드시 아래 양식으로 최종 제안서를 작성하세요:
+
+---
+
+# 맞춤 교육 제안서
+
+## 📋 과정 개요
+* **과정명:** (창의적이고 전문적인 과정명)
+* **교육 대상:** {target}
+* **교육 목적:** (개괄식으로 2개 작성)
+* **교육 시간:** {total_h}H
+* **교육 방식:** (강의형/실습형/워크샵형 중 선택)
+
+---
+
+## 📚 상세 커리큘럼
+
+### 1. [모듈 주제명] (60~90분 제안)
+- 주요 학습 내용 요약 (1~2문장)
+  - 세부 상세 내용 1
+  - 세부 상세 내용 2
+  - 세부 상세 내용 3
+  - 세부 상세 내용 4
+  - 세부 상세 내용 5
+  - [실습/토의/롤플레잉] 구체적 활동명 및 실행 방법
+
+(모듈은 교육 시간에 따라 자유롭게 추가. 표 사용 절대 금지)
+"""
+
+    curriculum = None
+    for api_attempt in range(3):
+        try:
+            response = client_genai.models.generate_content(model=MODEL_NAME, contents=prompt)
+            curriculum = response.text
+            break
+        except Exception as e:
+            if "429" in str(e) and api_attempt < 2:
+                wait = 60 * (api_attempt + 1)
+                st.warning(f"⏳ API 제한. {wait}초 후 재시도... ({api_attempt+1}/3)")
+                time.sleep(wait)
+            else:
+                raise e
+
+    if curriculum is None:
+        raise Exception("A/B 통합 제안서 생성에 실패했습니다.")
+
+    timing_result = validate_curriculum_timing(curriculum, total_h)
+    return curriculum, timing_result
 
 
 # ============ 검수자 AI ============
@@ -1182,7 +1278,6 @@ _DEFAULTS = {
     "ab_cot": None,
     "ab_draft_a": None,
     "ab_draft_b": None,
-    "ab_selected": "A",
     "ab_feedback": "",
 }
 for _k, _v in _DEFAULTS.items():
@@ -1533,32 +1628,22 @@ if current_step >= 3 and st.session_state.retrieved_modules:
                 st.session_state.ab_draft_b = draft_b
                 st.rerun()
 
-        # ── A/B 선택 UI ──
+        # ── A/B 결과 UI ──
         if st.session_state.ab_draft_a:
             if st.session_state.ab_cot:
                 with st.expander("💭 AI 설계 사고 과정", expanded=False):
                     st.markdown(st.session_state.ab_cot)
 
-            st.markdown("#### 두 가지 커리큘럼 방향 중 선택하세요")
+            st.markdown("#### A안 · B안 완성 제안서")
             tab_a, tab_b = st.tabs(["📘 A안", "📗 B안"])
             with tab_a:
                 st.markdown(st.session_state.ab_draft_a)
             with tab_b:
                 st.markdown(st.session_state.ab_draft_b)
 
-            ab_choice = st.radio(
-                "선택",
-                ["A안", "B안"],
-                index=0 if st.session_state.ab_selected == "A" else 1,
-                horizontal=True,
-                key="ab_radio",
-                label_visibility="collapsed",
-            )
-            st.session_state.ab_selected = "A" if ab_choice == "A안" else "B"
-
             ab_feedback = st.text_area(
-                "✏️ 피드백 / 수정 요청 (선택)",
-                placeholder="예: A안을 기반으로 하되 3모듈에 사례 분석을 추가해주세요. 실습 비중을 늘려주세요.",
+                "✏️ 의견 작성 (선택사항 — AI가 참고하여 A·B안을 통합)",
+                placeholder="예: A안의 도입 방식과 B안의 실습 구성을 결합해주세요. 실습 비중을 늘려주세요.",
                 height=80,
                 key="ab_feedback_input",
             )
@@ -1572,27 +1657,16 @@ if current_step >= 3 and st.session_state.retrieved_modules:
                     st.session_state.ab_cot     = None
                     st.rerun()
             with col_gen:
-                if st.button("🚀 최종 제안서 생성", type="primary", use_container_width=True, key="step3_generate"):
-                    sel_details = [r_mods[i] for i in st.session_state.selected_modules] if st.session_state.selected_modules else None
-                    track  = st.session_state.generation_track
-                    adv_ctx = st.session_state.advanced_context if track == "advanced" else {}
+                if st.button("🔀 A·B안 통합 최선 제안서 생성", type="primary", use_container_width=True, key="step3_generate"):
+                    _prog = st.progress(0, text="🔀 A·B안 비교 분석 중...")
+                    _prog.progress(30, text="✍️ 최선 요소 통합 중...")
 
-                    selected_draft = st.session_state.ab_draft_a if st.session_state.ab_selected == "A" else st.session_state.ab_draft_b
-                    adv_ctx["선택된_커리큘럼_방향"] = selected_draft
-                    if st.session_state.ab_feedback.strip():
-                        adv_ctx["사용자_피드백"] = st.session_state.ab_feedback
-
-                    _prog = st.progress(0, text="✍️ 선택한 방향으로 최종 제안서 작성 중...")
-                    _prog.progress(40, text="✍️ 커리큘럼 세부 내용 작성 중...")
-
-                    proposal, timing_result = assemble_curriculum(
+                    proposal, timing_result = combine_ab_proposals(
+                        st.session_state.ab_draft_a,
+                        st.session_state.ab_draft_b,
+                        st.session_state.ab_feedback,
                         st.session_state.needs_json,
-                        st.session_state.grouped,
                         duration,
-                        st.session_state.retrieved_modules_json,
-                        sel_details,
-                        track="advanced",
-                        advanced_context=adv_ctx,
                     )
 
                     _prog.progress(90, text="🔍 품질 검증 중...")
