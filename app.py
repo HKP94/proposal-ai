@@ -707,7 +707,7 @@ def assemble_curriculum(needs_json, grouped_modules, duration, retrieved_modules
 
 ---
 
-# [고객사명] 맞춤 교육 제안서
+# 맞춤 교육 제안서
 
 ## 📋 과정 개요
 * **과정명:** (창의적이고 전문적인 과정명)
@@ -762,7 +762,7 @@ def assemble_curriculum(needs_json, grouped_modules, duration, retrieved_modules
 (개인 구성원 차원에서 기대되는 성장 2~3문장)
 
 ---
-*본 제안서는 [고객사명]의 요구사항을 반영하여 작성된 맞춤형 초안입니다.*
+*본 제안서는 고객사의 요구사항을 반영하여 작성된 맞춤형 초안입니다.*
 *담당: [담당 컨설턴트명] | 문의: [연락처]*
 """
 
@@ -960,7 +960,7 @@ def improve_proposal(original_proposal: str, review_result: dict,
 
 ---
 위 피드백을 100% 반영하여, 동일한 섹션 구조(과정 개요 → 교육 목표 → 상세 커리큘럼 → 기대 효과)로
-마크다운 형식의 개선된 제안서를 작성하세요. [고객사명], [담당자명] 플레이스홀더는 유지하세요.
+마크다운 형식의 개선된 제안서를 작성하세요.
 
 커리큘럼 작성 시 반드시 아래 양식을 사용하세요 (표 사용 절대 금지):
 ### N. [모듈 주제명] (XX~XX분 제안)
@@ -1087,11 +1087,6 @@ st.subheader("1️⃣ 고객 정보 & 니즈 입력")
 
 if current_step == 1:
     # ── 고객 기본 정보 ──
-    st.text_input(
-        "🏢 고객사명",
-        key="company_name",
-        placeholder="예: 삼성전자, 현대자동차, SK하이닉스",
-    )
     col_i1, col_i2, col_i3 = st.columns(3)
     with col_i1:
         st.selectbox(
@@ -1217,12 +1212,11 @@ if current_step == 1:
 
 else:
     # Step 1 완료 요약
-    _co  = st.session_state.get("company_name", "")
     _ind = st.session_state.get("industry", "")
     _tgt = st.session_state.get("target", "")
     _dur = st.session_state.get("duration", 8)
     st.markdown(
-        f'<div class="step-done">✅ {_co} | {_ind} | {_tgt} | {_dur}H | {str(st.session_state.initial_query or "")[:60]}…</div>',
+        f'<div class="step-done">✅ {_ind} | {_tgt} | {_dur}H | {str(st.session_state.initial_query or "")[:60]}…</div>',
         unsafe_allow_html=True
     )
 
@@ -1391,14 +1385,10 @@ if current_step >= 3 and st.session_state.retrieved_modules:
 
         st.divider()
 
-        if not company_name.strip():
-            st.warning("⚠️ 위 고객사명을 입력해야 제안서를 생성할 수 있습니다.")
-
         if st.button(
             "🚀 제안서 생성",
             type="primary",
             use_container_width=True,
-            disabled=not company_name.strip(),
             key="step3_generate"
         ):
             final_sel_idx = [i for i in range(len(r_mods)) if st.session_state.get(f"mod_sel_{i}", False)]
