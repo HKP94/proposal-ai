@@ -1,5 +1,5 @@
 """
-제안서 AI 어시스턴트 v2.0
+제안서 AI 어시스턴트
 3-Step RAG: 니즈 분석 → 모듈 검색 → 커리큘럼 조합 → 양식 출력
 """
 
@@ -2077,4 +2077,4 @@ if current_step >= 4 and st.session_state.proposal:
         st.caption("💡 '🔍 AI 검수 시작' 버튼을 다시 누르면 재작성본을 검수합니다.")
 
 st.divider()
-st.caption("💡 Powered by Gemini AI + ChromaDB | 티엔에프컨설팅 제안서 202개 기반")
+st.caption("💡 Powered by Gemini AI + Claude | 티엔에프컨설팅 제안서 기반")
