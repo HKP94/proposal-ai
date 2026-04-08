@@ -494,6 +494,49 @@ def search_modules_detailed(collection, needs_json, db_type):
                 "권장시간":     meta.get("권장시간", ""),
             })
 
+    # ── 정렬: similarity_percent 내림차순 ──
+    retrieved_modules.sort(key=lambda x: x["similarity_percent"], reverse=True)
+
+    # ── 비즈니스 맥락 분석: 추천 타겟 / 관련 산업 ──
+    if retrieved_modules and db_type == "module":
+        items = ""
+        for i, m in enumerate(retrieved_modules):
+            course  = m.get("과정명", "")
+            name    = m.get("모듈명", "")
+            content = m.get("내용_원문", "")[:200]
+            items  += f"{i}. 과정명: {course} | 모듈명: {name} | 내용: {content}\n"
+
+        ctx_prompt = f"""아래 교육 모듈들을 보고 각 모듈의 추천 타겟 직급과 관련 산업을 추론하세요.
+
+모듈 목록:
+{items}
+
+규칙:
+- 추천타겟: 아래 중 가장 적합한 1~2개만 선택
+  선택지: 전직급, 신입/주니어, 실무자, 팀장/리더급, 중간관리자, 임원, C-Level
+- 관련산업: 아래 중 가장 적합한 1~2개만 선택
+  선택지: 전산업, 금융/은행, 제조, 공공기관, IT/테크, 건설/부동산, 에너지/유틸리티, 유통/서비스, 의료/헬스케어
+
+반드시 아래 JSON 형식으로만 응답:
+{{"0": {{"추천타겟": ["팀장/리더급"], "관련산업": ["금융/은행"]}}, "1": {{"추천타겟": ["전직급"], "관련산업": ["전산업"]}}}}"""
+
+        try:
+            ctx_resp = client_genai.models.generate_content(
+                model=MODEL_NAME,
+                contents=ctx_prompt,
+                config={"response_mime_type": "application/json"}
+            )
+            ctx_result = json.loads(ctx_resp.text)
+            for i, m in enumerate(retrieved_modules):
+                ctx = ctx_result.get(str(i), {})
+                m["추천타겟"] = ctx.get("추천타겟", [])
+                m["관련산업"] = ctx.get("관련산업", [])
+        except Exception as e:
+            print(f"[맥락 분석 실패] {e}")
+            for m in retrieved_modules:
+                m["추천타겟"] = []
+                m["관련산업"] = []
+
     retrieved_json = json.dumps(retrieved_modules, ensure_ascii=False, indent=2)
     return retrieved_modules, retrieved_json
 
@@ -1631,10 +1674,21 @@ if current_step >= 3 and st.session_state.retrieved_modules:
     r_mods = st.session_state.retrieved_modules
 
     if current_step == 3:
-        st.caption(
-            "검색된 모듈 중 커리큘럼에 포함할 모듈을 선택하세요. "
-            "선택하지 않으면 AI가 자동으로 최적 모듈을 선택합니다."
-        )
+        col_caption, col_back = st.columns([5, 2])
+        with col_caption:
+            st.caption(
+                "검색된 모듈 중 커리큘럼에 포함할 모듈을 선택하세요. "
+                "선택하지 않으면 AI가 자동으로 최적 모듈을 선택합니다."
+            )
+        with col_back:
+            if st.button("🔄 니즈 다시 고도화하기", use_container_width=True, key="back_to_needs"):
+                st.session_state.workflow_step = 1
+                st.session_state.retrieved_modules = []
+                st.session_state.retrieved_modules_json = None
+                st.session_state.ab_draft_a = None
+                st.session_state.ab_draft_b = None
+                st.session_state.ab_cot = None
+                st.rerun()
 
         type_label = {"intro": "🔵 도입", "core": "🟢 핵심", "apply": "🟡 현업적용"}
 
@@ -1658,6 +1712,9 @@ if current_step >= 3 and st.session_state.retrieved_modules:
             tag        = type_label.get(char, "🟢 핵심")
             stars      = sim_to_stars(sim)
 
+            target_tags   = mod.get("추천타겟", [])
+            industry_tags = mod.get("관련산업", [])
+
             col_chk, col_info = st.columns([1, 11])
             with col_chk:
                 st.checkbox("선택", key=f"mod_sel_{i}", label_visibility="collapsed")
@@ -1665,6 +1722,14 @@ if current_step >= 3 and st.session_state.retrieved_modules:
                 with st.expander(
                     f"{tag} **{mod_name}** | {course} | {rec_time} | {stars} ({sim}%)"
                 ):
+                    if target_tags or industry_tags:
+                        tag_html = '<div style="margin-bottom:8px;">'
+                        for t in target_tags:
+                            tag_html += f'<span style="background:#e8f4f8;color:#1a6b9e;padding:2px 8px;border-radius:10px;font-size:0.75rem;margin-right:4px;">👤 {t}</span>'
+                        for ind in industry_tags:
+                            tag_html += f'<span style="background:#f0f8e8;color:#2d6a1e;padding:2px 8px;border-radius:10px;font-size:0.75rem;margin-right:4px;">🏢 {ind}</span>'
+                        tag_html += '</div>'
+                        st.markdown(tag_html, unsafe_allow_html=True)
                     if content:
                         for ln in content.split("\n"):
                             if ln.strip():
