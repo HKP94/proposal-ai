@@ -306,11 +306,15 @@ def analyze_needs(query, industry, target, duration):
 
 [고객 입력]
 니즈: {query}
-산업군: {industry}
-교육 대상: {target}
+UI 산업군(참고용): {industry}
+UI 교육 대상(참고용): {target}
 교육 시간: {duration_h}H
 
 [출력 규칙]
+- target: 교육 대상 직급. 니즈 텍스트에서 구체적으로 언급된 경우 그 내용을 우선 반영. 아니면 UI 값 사용.
+  (예시: "팀장/리더급", "신입사원", "실무진", "중간관리자", "임원", "전직급")
+- industry: 산업군. 니즈 텍스트에서 구체적으로 언급된 경우 그 내용을 우선 반영. 아니면 UI 값 사용.
+  (예시: "전산업", "제조", "금융/은행", "공공기관", "IT/테크", "건설/부동산", "유통/서비스")
 - core_keywords: 교육에서 반드시 다뤄야 할 핵심 역량/주제 키워드 3~5개
 - pain_point: 현재 조직/구성원의 핵심 문제점 1~2문장
 - expected_behavior: 교육 후 기대되는 구체적 행동 변화 1~2문장
@@ -319,8 +323,8 @@ def analyze_needs(query, industry, target, duration):
 반드시 아래 JSON 형식으로만 응답하세요. 다른 텍스트는 절대 포함하지 마세요.
 
 {{
-  "target": "{target}",
-  "industry": "{industry}",
+  "target": "니즈에서 추론한 교육 대상",
+  "industry": "니즈에서 추론한 산업군",
   "duration_hours": {duration_h},
   "core_keywords": ["키워드1", "키워드2", "키워드3"],
   "pain_point": "현재 문제점",
