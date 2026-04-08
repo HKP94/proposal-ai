@@ -1415,7 +1415,7 @@ st.markdown("""
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📋 제안서 AI 어시스턴트 v3.0")
+st.title("📋 제안서 AI 어시스턴트")
 st.caption("고객 니즈 수집 → 니즈 확인 → 모듈 선택 → 맞춤 제안서 생성")
 
 # ── session_state 초기화 ──
@@ -1456,10 +1456,6 @@ current_step = st.session_state.workflow_step
 
 # ── 사이드바 ──
 with st.sidebar:
-    if os.path.exists(MODULE_DB_PATH):
-        st.success("✅ 모듈 DB 사용 중")
-    else:
-        st.warning("⚠️ 모듈 DB 없음")
     st.caption(f"🤖 모델: `{MODEL_NAME}`")
     st.divider()
     if st.button("🔄 처음부터 다시 시작", use_container_width=True):
@@ -2150,4 +2146,4 @@ if current_step >= 4 and st.session_state.proposal:
         st.caption("💡 '🔍 AI 검수 시작' 버튼을 다시 누르면 재작성본을 검수합니다.")
 
 st.divider()
-st.caption("💡 Powered by Gemini AI + Claude | 티엔에프컨설팅 제안서 기반")
+st.caption("💡 Powered by Gemini AI")
