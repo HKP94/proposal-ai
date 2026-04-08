@@ -383,22 +383,26 @@ def _generate_search_queries(needs_json: dict) -> list:
     - 하드코딩 쿼리 대비 훨씬 높은 검색 적합도
     - 실패 시 기본 쿼리로 폴백
     """
-    kw   = needs_json.get("core_keywords", [])
-    pain = needs_json.get("pain_point", "")
+    kw       = needs_json.get("core_keywords", [])
+    pain     = needs_json.get("pain_point", "")
     behavior = needs_json.get("expected_behavior", "")
+    target   = needs_json.get("target", "")
+    industry = needs_json.get("industry", "")
 
     prompt = f"""당신은 HRD 교육 모듈 DB 검색 전문가입니다.
 아래 교육 니즈를 보고, 벡터 DB 검색에 최적화된 검색 쿼리 3개를 생성하세요.
 
 교육 니즈:
+- 교육 대상: {target}
+- 산업군: {industry}
 - 핵심 키워드: {', '.join(kw)}
 - 문제점: {pain}
 - 기대 행동 변화: {behavior}
 
 규칙:
-1. 쿼리 1: 핵심 주제와 관련 동의어·유사어를 모두 포함 (예: "윤리경영" → "윤리경영 컴플라이언스 도덕적의사결정 청렴 부패방지")
-2. 쿼리 2: 교육 내용 관점 — 모듈에서 다룰 법한 구체적 학습 내용·스킬
-3. 쿼리 3: 현업 적용 관점 — 교육 후 실제 업무에서 쓰는 상황·행동
+1. 쿼리 1: 핵심 주제와 관련 동의어·유사어를 모두 포함. 교육 대상({target})과 산업군({industry})에 맞는 맥락 용어도 추가 (예: 팀장 대상 금융권 → "팀장 리더십 금융 지점장 성과관리")
+2. 쿼리 2: 교육 내용 관점 — {target}이 실제로 배울 법한 구체적 학습 내용·스킬. {industry} 업종 특성 반영
+3. 쿼리 3: 현업 적용 관점 — 교육 후 {target}이 {industry} 현업에서 실제로 쓰는 상황·행동
 
 반드시 JSON 배열로만 응답: ["쿼리1", "쿼리2", "쿼리3"]"""
 
@@ -415,11 +419,11 @@ def _generate_search_queries(needs_json: dict) -> list:
     except Exception as e:
         print(f"[검색 쿼리 생성 실패, 기본 쿼리 사용] {e}")
 
-    # 폴백: 기본 쿼리
+    # 폴백: 기본 쿼리 (target/industry 포함)
     return [
-        " ".join(kw),
-        f"{pain} {behavior}",
-        " ".join(kw) + f" {pain}",
+        f"{target} {industry} " + " ".join(kw),
+        f"{target} {pain} {behavior}",
+        f"{industry} " + " ".join(kw) + f" {pain}",
     ]
 
 
