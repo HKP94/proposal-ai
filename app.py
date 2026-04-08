@@ -536,7 +536,10 @@ def search_modules_detailed(collection, needs_json, db_type):
             )
             ctx_result = json.loads(ctx_resp.text)
             for i, m in enumerate(retrieved_modules):
-                ctx = ctx_result.get(str(i), {})
+                if isinstance(ctx_result, list):
+                    ctx = ctx_result[i] if i < len(ctx_result) else {}
+                else:
+                    ctx = ctx_result.get(str(i), {})
                 m["추천타겟"] = ctx.get("추천타겟", [])
                 m["관련산업"] = ctx.get("관련산업", [])
         except Exception as e:
@@ -1723,17 +1726,14 @@ if current_step >= 3 and st.session_state.retrieved_modules:
             with col_chk:
                 st.checkbox("선택", key=f"mod_sel_{i}", label_visibility="collapsed")
             with col_info:
+                tag_suffix = ""
+                if target_tags or industry_tags:
+                    tag_suffix = "  " + " ".join(
+                        [f"👤{t}" for t in target_tags] + [f"🏢{ind}" for ind in industry_tags]
+                    )
                 with st.expander(
-                    f"{tag} **{mod_name}** | {course} | {rec_time} | {stars} ({sim}%)"
+                    f"{tag} **{mod_name}** | {course} | {rec_time} | {stars} ({sim}%){tag_suffix}"
                 ):
-                    if target_tags or industry_tags:
-                        tag_html = '<div style="margin-bottom:8px;">'
-                        for t in target_tags:
-                            tag_html += f'<span style="background:#e8f4f8;color:#1a6b9e;padding:2px 8px;border-radius:10px;font-size:0.75rem;margin-right:4px;">👤 {t}</span>'
-                        for ind in industry_tags:
-                            tag_html += f'<span style="background:#f0f8e8;color:#2d6a1e;padding:2px 8px;border-radius:10px;font-size:0.75rem;margin-right:4px;">🏢 {ind}</span>'
-                        tag_html += '</div>'
-                        st.markdown(tag_html, unsafe_allow_html=True)
                     if content:
                         for ln in content.split("\n"):
                             if ln.strip():
