@@ -1724,17 +1724,17 @@ if current_step >= 3 and st.session_state.retrieved_modules:
             with col_chk:
                 st.checkbox("선택", key=f"mod_sel_{i}", label_visibility="collapsed")
             with col_info:
+                if target_tags or industry_tags:
+                    tag_html = '<div style="margin-bottom:4px;display:flex;flex-wrap:wrap;gap:5px;">'
+                    for t in target_tags:
+                        tag_html += f'<span style="background:#e8f4f8;color:#1a6b9e;padding:2px 9px;border-radius:10px;font-size:0.76rem;border:1px solid #b8d9ee;">👤 {t}</span>'
+                    for ind in industry_tags:
+                        tag_html += f'<span style="background:#f0f8e8;color:#2d6a1e;padding:2px 9px;border-radius:10px;font-size:0.76rem;border:1px solid #b8d9b8;">🏢 {ind}</span>'
+                    tag_html += '</div>'
+                    st.markdown(tag_html, unsafe_allow_html=True)
                 with st.expander(
                     f"**{mod_name}** | {course} | {rec_time} | {stars} ({sim}%)"
                 ):
-                    if target_tags or industry_tags:
-                        tag_html = '<div style="margin-bottom:10px;display:flex;flex-wrap:wrap;gap:6px;">'
-                        for t in target_tags:
-                            tag_html += f'<span style="background:#e8f4f8;color:#1a6b9e;padding:3px 10px;border-radius:12px;font-size:0.78rem;border:1px solid #b8d9ee;">👤 {t}</span>'
-                        for ind in industry_tags:
-                            tag_html += f'<span style="background:#f0f8e8;color:#2d6a1e;padding:3px 10px;border-radius:12px;font-size:0.78rem;border:1px solid #b8d9b8;">🏢 {ind}</span>'
-                        tag_html += '</div>'
-                        st.markdown(tag_html, unsafe_allow_html=True)
                     if content:
                         for ln in content.split("\n"):
                             if ln.strip():
