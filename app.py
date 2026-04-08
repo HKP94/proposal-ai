@@ -2147,4 +2147,4 @@ if current_step >= 4 and st.session_state.proposal:
         st.caption("💡 '🔍 AI 검수 시작' 버튼을 다시 누르면 재작성본을 검수합니다.")
 
 st.divider()
-st.caption("💡 Powered by Gemini AI")
+st.caption("💡 Powered by KPH")
