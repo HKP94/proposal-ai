@@ -21,3 +21,11 @@ __pycache__/
 
 # Streamlit secrets (API 키 포함 - 절대 커밋 금지)
 .streamlit/secrets.toml
+
+# 모듈 추가 작업 폴더 (로컬 전용)
+module_add/
+module_db_backup/
+module_db_export.csv
+*_backup/
+merge_module_db.py
+rebuild_module_db.py
