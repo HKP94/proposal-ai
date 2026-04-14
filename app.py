@@ -315,7 +315,7 @@ UI 교육 대상(참고용): {target}
   (예시: "팀장/리더급", "신입사원", "실무진", "중간관리자", "임원", "전직급")
 - industry: 산업군. 니즈 텍스트에서 구체적으로 언급된 경우 그 내용을 우선 반영. 아니면 UI 값 사용.
   (예시: "전산업", "제조", "금융/은행", "공공기관", "IT/테크", "건설/부동산", "유통/서비스")
-- core_keywords: 교육에서 반드시 다뤄야 할 핵심 역량/주제 키워드 3~5개
+- core_keywords: 교육에서 반드시 다뤄야 할 핵심 역량/주제 키워드 3~5개 (산업군·직급·시간 등 메타 정보는 제외하고 실제 교육 내용 키워드만 추출)
 - pain_point: 현재 조직/구성원의 핵심 문제점 1~2문장
 - expected_behavior: 교육 후 기대되는 구체적 행동 변화 1~2문장
 - learning_level: beginner / intermediate / advanced 중 선택
@@ -1003,35 +1003,43 @@ def assemble_curriculum_ab(needs_json, retrieved_modules_json, duration, selecte
 ---DRAFT_B_END---
 """
 
-    try:
-        resp = client_genai.models.generate_content(model=MODEL_NAME, contents=prompt)
-        text = resp.text
+    last_exc = None
+    for attempt in range(3):
+        try:
+            resp = client_genai.models.generate_content(model=MODEL_NAME, contents=prompt)
+            text = resp.text
 
-        # CoT 파싱
-        cot_text = ""
-        if "## 💭 AI 설계 사고 과정" in text:
-            cot_start = text.index("## 💭 AI 설계 사고 과정")
-            cot_end   = text.index("---DRAFT_A_START---") if "---DRAFT_A_START---" in text else len(text)
-            cot_text  = text[cot_start:cot_end].strip()
+            # CoT 파싱
+            cot_text = ""
+            if "## 💭 AI 설계 사고 과정" in text:
+                cot_start = text.index("## 💭 AI 설계 사고 과정")
+                cot_end   = text.index("---DRAFT_A_START---") if "---DRAFT_A_START---" in text else len(text)
+                cot_text  = text[cot_start:cot_end].strip()
 
-        # A안 파싱
-        draft_a = ""
-        if "---DRAFT_A_START---" in text and "---DRAFT_A_END---" in text:
-            a_start = text.index("---DRAFT_A_START---") + len("---DRAFT_A_START---")
-            a_end   = text.index("---DRAFT_A_END---")
-            draft_a = text[a_start:a_end].strip()
+            # A안 파싱
+            draft_a = ""
+            if "---DRAFT_A_START---" in text and "---DRAFT_A_END---" in text:
+                a_start = text.index("---DRAFT_A_START---") + len("---DRAFT_A_START---")
+                a_end   = text.index("---DRAFT_A_END---")
+                draft_a = text[a_start:a_end].strip()
 
-        # B안 파싱
-        draft_b = ""
-        if "---DRAFT_B_START---" in text and "---DRAFT_B_END---" in text:
-            b_start = text.index("---DRAFT_B_START---") + len("---DRAFT_B_START---")
-            b_end   = text.index("---DRAFT_B_END---")
-            draft_b = text[b_start:b_end].strip()
+            # B안 파싱
+            draft_b = ""
+            if "---DRAFT_B_START---" in text and "---DRAFT_B_END---" in text:
+                b_start = text.index("---DRAFT_B_START---") + len("---DRAFT_B_START---")
+                b_end   = text.index("---DRAFT_B_END---")
+                draft_b = text[b_start:b_end].strip()
 
-        return cot_text, draft_a, draft_b
+            return cot_text, draft_a, draft_b
 
-    except Exception as e:
-        raise Exception(f"A/B 제안서 생성 실패: {e}")
+        except Exception as e:
+            last_exc = e
+            if "429" in str(e) and attempt < 2:
+                time.sleep(60 * (attempt + 1))
+                continue
+            break
+
+    raise Exception(f"A/B 제안서 생성 실패: {last_exc}")
 
 
 # ============ A/B 통합 최선 제안서 생성 ============
@@ -1606,10 +1614,11 @@ if current_step == 1:
             st.rerun()
 
 else:
-    # Step 1 완료 요약
-    _ind = st.session_state.get("industry", "")
-    _tgt = st.session_state.get("target", "")
-    _dur = st.session_state.get("duration", 8)
+    # Step 1 완료 요약 — 위젯 키는 step>1에서 초기화되므로 needs_json에서 읽음
+    _nj  = st.session_state.get("needs_json") or {}
+    _ind = _nj.get("industry") or st.session_state.get("industry", "")
+    _tgt = _nj.get("target")   or st.session_state.get("target", "")
+    _dur = _nj.get("duration_hours") or st.session_state.get("duration", 8)
     st.markdown(
         f'<div class="step-done">✅ {_ind} | {_tgt} | {_dur}H | {str(st.session_state.initial_query or "")[:60]}…</div>',
         unsafe_allow_html=True
@@ -1804,12 +1813,16 @@ if current_step >= 3 and st.session_state.retrieved_modules:
                 st.session_state.selected_modules = final_sel_idx
                 sel_details = [r_mods[i] for i in final_sel_idx]
                 with st.spinner("💭 AI가 두 가지 커리큘럼 방향을 설계하는 중..."):
-                    cot, draft_a, draft_b = assemble_curriculum_ab(
-                        st.session_state.needs_json,
-                        st.session_state.retrieved_modules_json,
-                        duration,
-                        sel_details if sel_details else None,
-                    )
+                    try:
+                        cot, draft_a, draft_b = assemble_curriculum_ab(
+                            st.session_state.needs_json,
+                            st.session_state.retrieved_modules_json,
+                            duration,
+                            sel_details if sel_details else None,
+                        )
+                    except Exception as _ab_err:
+                        st.error(f"⚠️ A/B 초안 생성 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.\n\n`{_ab_err}`")
+                        st.stop()
                 st.session_state.ab_cot     = cot
                 st.session_state.ab_draft_a = draft_a
                 st.session_state.ab_draft_b = draft_b
