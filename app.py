@@ -1004,7 +1004,7 @@ def assemble_curriculum_ab(needs_json, retrieved_modules_json, duration, selecte
 """
 
     last_exc = None
-    for attempt in range(3):
+    for attempt in range(5):
         try:
             resp = client_genai.models.generate_content(model=MODEL_NAME, contents=prompt)
             text = resp.text
@@ -1034,8 +1034,10 @@ def assemble_curriculum_ab(needs_json, retrieved_modules_json, duration, selecte
 
         except Exception as e:
             last_exc = e
-            if "429" in str(e) and attempt < 2:
-                time.sleep(60 * (attempt + 1))
+            if ("503" in str(e) or "UNAVAILABLE" in str(e) or "429" in str(e)) and attempt < 4:
+                wait = 20 * (attempt + 1)
+                print(f"[A/B 생성 오류] {wait}초 후 재시도 (시도 {attempt+1}/5): {e}")
+                time.sleep(wait)
                 continue
             break
 
@@ -1820,13 +1822,12 @@ if current_step >= 3 and st.session_state.retrieved_modules:
                             duration,
                             sel_details if sel_details else None,
                         )
-                    except Exception as _ab_err:
-                        st.error(f"⚠️ A/B 초안 생성 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.\n\n`{_ab_err}`")
-                        st.stop()
-                st.session_state.ab_cot     = cot
-                st.session_state.ab_draft_a = draft_a
-                st.session_state.ab_draft_b = draft_b
-                st.rerun()
+                        st.session_state.ab_cot     = cot
+                        st.session_state.ab_draft_a = draft_a
+                        st.session_state.ab_draft_b = draft_b
+                        st.rerun()
+                    except Exception as e:
+                        st.warning(f"⚠️ A/B 초안 생성 중 오류가 발생했습니다. 잠시 후 다시 시도해 주세요.\n\n{e}")
 
         # ── A/B 결과 UI ──
         if st.session_state.ab_draft_a:
