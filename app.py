@@ -737,7 +737,7 @@ def assemble_curriculum(needs_json, grouped_modules, duration, retrieved_modules
 이 목록에 없는 새로운 활동을 창작하면 안 됩니다.
 
 ```json
-{retrieved_modules_json}
+{_slim_modules_json(retrieved_modules_json, content_limit=400) if retrieved_modules_json else "{}"}
 ```
 
 ## 검색된 교육 모듈 풀 (참고용 - 위 JSON이 정확함)
@@ -910,6 +910,19 @@ def assemble_curriculum(needs_json, grouped_modules, duration, retrieved_modules
     return last_curriculum, timing_result
 
 
+# ============ 프롬프트용 모듈 JSON 경량화 (토큰 절약) ============
+def _slim_modules_json(retrieved_modules_json: str, content_limit: int = 300) -> str:
+    """내용_원문을 content_limit자로 잘라 프롬프트 토큰 수를 줄임."""
+    try:
+        mods = json.loads(retrieved_modules_json)
+        for m in mods:
+            if "내용_원문" in m and len(m["내용_원문"]) > content_limit:
+                m["내용_원문"] = m["내용_원문"][:content_limit] + "…"
+        return json.dumps(mods, ensure_ascii=False)
+    except Exception:
+        return retrieved_modules_json
+
+
 # ============ A/B 완성 제안서 생성 (CoT) ============
 def assemble_curriculum_ab(needs_json, retrieved_modules_json, duration, selected_modules=None):
     """
@@ -925,6 +938,9 @@ def assemble_curriculum_ab(needs_json, retrieved_modules_json, duration, selecte
     keywords = ", ".join(needs_json.get("core_keywords", []))
     pain     = needs_json.get("pain_point", "")
     behavior = needs_json.get("expected_behavior", "")
+
+    # 토큰 절약: 내용_원문을 300자로 제한
+    slim_modules_json = _slim_modules_json(retrieved_modules_json, content_limit=300)
 
     sel_note = ""
     if selected_modules:
@@ -973,7 +989,7 @@ def assemble_curriculum_ab(needs_json, retrieved_modules_json, duration, selecte
 {sel_note}
 ## 검색된 교육 모듈 (이 모듈만 사용)
 ```json
-{retrieved_modules_json}
+{slim_modules_json}
 ```
 
 ## 작성 규칙
@@ -1307,13 +1323,14 @@ def improve_proposal(original_proposal: str, review_result: dict,
                 cot_text = f"(사고 과정 생성 실패: {e})"
                 break
 
-    # 모듈 DB 전체 내용 (2단계 재작성용)
+    # 모듈 DB 전체 내용 (2단계 재작성용) — 토큰 절약: 내용_원문 400자 제한
     modules_section = ""
     if retrieved_modules_json:
+        _slim_for_rewrite = _slim_modules_json(retrieved_modules_json, content_limit=400)
         modules_section = f"""
 ## 검색된 교육 모듈 (내용_원문에서 활동을 추출해 커리큘럼에 활용)
 ```json
-{retrieved_modules_json}
+{_slim_for_rewrite}
 ```
 """
     elif grouped_modules:
