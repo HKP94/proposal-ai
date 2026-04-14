@@ -26,7 +26,7 @@ if not API_KEY:
     st.stop()
 
 client_genai = genai.Client(api_key=API_KEY)
-MODEL_NAME = "gemini-2.0-flash-lite"
+MODEL_NAME = "gemini-2.5-flash-lite"
 
 # ============ [P0-A] Interactive Needs Gathering ============
 # 필수 정보 체크리스트
