@@ -26,8 +26,7 @@ if not API_KEY:
     st.stop()
 
 client_genai = genai.Client(api_key=API_KEY)
-MODEL_NAME = "gemini-3.1-flash-lite-preview"
-FALLBACK_MODEL = "gemini-2.0-flash"  # 503 발생 시 폴백용 안정 모델
+MODEL_NAME = "gemini-2.0-flash-lite"
 
 # ============ [P0-A] Interactive Needs Gathering ============
 # 필수 정보 체크리스트
@@ -1020,13 +1019,9 @@ def assemble_curriculum_ab(needs_json, retrieved_modules_json, duration, selecte
 ---DRAFT_B_END---
 """
 
-    last_exc = None
-    # 처음 2회는 기본 모델, 이후 3회는 폴백 모델 사용 (503/UNAVAILABLE 대응)
-    _models = [MODEL_NAME] * 2 + [FALLBACK_MODEL] * 3
-    for attempt, _model in enumerate(_models):
+    for attempt in range(2):
         try:
-            print(f"[A/B 생성] 시도 {attempt+1}/5, 모델: {_model}")
-            resp = client_genai.models.generate_content(model=_model, contents=prompt)
+            resp = client_genai.models.generate_content(model=MODEL_NAME, contents=prompt)
             text = resp.text
 
             # CoT 파싱
@@ -1053,15 +1048,12 @@ def assemble_curriculum_ab(needs_json, retrieved_modules_json, duration, selecte
             return cot_text, draft_a, draft_b
 
         except Exception as e:
-            last_exc = e
-            if "503" in str(e) or "UNAVAILABLE" in str(e) or "429" in str(e):
-                wait = 10 * (attempt + 1)
-                print(f"[A/B 생성 오류] {wait}초 후 재시도 (시도 {attempt+1}/5, 모델: {_model}): {e}")
+            if ("429" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e)) and attempt == 0:
+                m = __import__('re').search(r'retry[^\d]*(\d+(?:\.\d+)?)\s*s', str(e), __import__('re').IGNORECASE)
+                wait = int(float(m.group(1))) + 5 if m else 30
                 time.sleep(wait)
-                continue
-            break
-
-    raise Exception(f"A/B 제안서 생성 실패: {last_exc}")
+            else:
+                raise Exception(f"A/B 제안서 생성 실패: {e}")
 
 
 # ============ A/B 통합 최선 제안서 생성 ============
@@ -1145,16 +1137,15 @@ def combine_ab_proposals(proposal_a, proposal_b, user_opinion, needs_json, durat
 """
 
     curriculum = None
-    _models = [MODEL_NAME] * 2 + [FALLBACK_MODEL] * 3
-    for api_attempt, _model in enumerate(_models):
+    for api_attempt in range(2):
         try:
-            response = client_genai.models.generate_content(model=_model, contents=prompt)
+            response = client_genai.models.generate_content(model=MODEL_NAME, contents=prompt)
             curriculum = response.text
             break
         except Exception as e:
-            if ("429" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e)) and api_attempt < 4:
-                wait = 15 * (api_attempt + 1)
-                print(f"[커리큘럼 생성 오류] {wait}초 후 재시도 ({api_attempt+1}/5, 모델: {_model}): {e}")
+            if ("429" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e)) and api_attempt == 0:
+                m = __import__('re').search(r'retry[^\d]*(\d+(?:\.\d+)?)\s*s', str(e), __import__('re').IGNORECASE)
+                wait = int(float(m.group(1))) + 5 if m else 30
                 time.sleep(wait)
             else:
                 raise e
@@ -1206,18 +1197,17 @@ def review_proposal(proposal_text: str, needs_json: dict) -> dict:
   "개선_지시문": "재생성 AI에게 전달할 구체적인 개선 지시 (2~4문장, 한국어)"
 }}"""
 
-    _models_rev = [MODEL_NAME] * 2 + [FALLBACK_MODEL] * 3
-    for attempt, _model in enumerate(_models_rev):
+    for attempt in range(2):
         try:
             response = client_genai.models.generate_content(
-                model=_model,
+                model=MODEL_NAME,
                 contents=prompt,
                 config={"response_mime_type": "application/json"}
             )
             return json.loads(response.text)
         except Exception as e:
-            if ("429" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e)) and attempt < 4:
-                time.sleep(15 * (attempt + 1))
+            if ("429" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e)) and attempt == 0:
+                time.sleep(30)
             else:
                 return {"총점": 0, "개선_지시문": str(e), "제출_가능_여부": "오류"}
 
@@ -1310,15 +1300,14 @@ def improve_proposal(original_proposal: str, review_result: dict,
 """
 
     cot_text = ""
-    _models_cot = [MODEL_NAME] * 2 + [FALLBACK_MODEL] * 3
-    for attempt, _model in enumerate(_models_cot):
+    for attempt in range(2):
         try:
-            resp = client_genai.models.generate_content(model=_model, contents=cot_prompt)
+            resp = client_genai.models.generate_content(model=MODEL_NAME, contents=cot_prompt)
             cot_text = resp.text
             break
         except Exception as e:
-            if ("429" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e)) and attempt < 4:
-                time.sleep(15 * (attempt + 1))
+            if ("429" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e)) and attempt == 0:
+                time.sleep(30)
             else:
                 cot_text = f"(사고 과정 생성 실패: {e})"
                 break
@@ -1400,15 +1389,14 @@ def improve_proposal(original_proposal: str, review_result: dict,
 (모듈은 교육 시간에 따라 자유롭게 추가. 표 사용 절대 금지)"""
 
     improved = ""
-    _models_imp = [MODEL_NAME] * 2 + [FALLBACK_MODEL] * 3
-    for attempt, _model in enumerate(_models_imp):
+    for attempt in range(2):
         try:
-            resp = client_genai.models.generate_content(model=_model, contents=rewrite_prompt)
+            resp = client_genai.models.generate_content(model=MODEL_NAME, contents=rewrite_prompt)
             improved = resp.text
             break
         except Exception as e:
-            if ("429" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e)) and attempt < 4:
-                time.sleep(15 * (attempt + 1))
+            if ("429" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e)) and attempt == 0:
+                time.sleep(30)
             else:
                 raise e
 
@@ -1494,7 +1482,7 @@ current_step = st.session_state.workflow_step
 
 # ── 사이드바 ──
 with st.sidebar:
-    st.caption(f"🤖 모델: `{MODEL_NAME}` (폴백: `{FALLBACK_MODEL}`)")
+    st.caption(f"🤖 모델: `{MODEL_NAME}`")
     st.divider()
     if st.button("🔄 처음부터 다시 시작", use_container_width=True):
         for _k in list(_DEFAULTS.keys()):
