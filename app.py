@@ -27,21 +27,37 @@ if not API_KEY:
 
 client_genai = genai.Client(api_key=API_KEY)
 
-def _resolve_model() -> str:
-    """사용 가능한 모델을 순서대로 확인하여 반환"""
-    for model in ["gemini-2.5-flash-lite", "gemini-3.1-flash-lite-preview"]:
-        try:
-            client_genai.models.generate_content(
-                model=model,
-                contents="ping",
-                config={"max_output_tokens": 1},
-            )
-            return model
-        except Exception:
-            continue
-    return "gemini-3.1-flash-lite-preview"
+MODEL_NAME     = "gemini-2.5-flash-lite"
+MODEL_FALLBACK = "gemini-3.1-flash-lite-preview"
 
-MODEL_NAME = _resolve_model()
+def _generate(prompt: str, json_mode: bool = False) -> str:
+    """
+    API 호출 공통 헬퍼.
+    - 503 / 429 / UNAVAILABLE → 최대 3회 재시도 (지수 대기)
+    - 기본 모델 모두 실패 시 폴백 모델로 1회 추가 시도
+    """
+    cfg = {"response_mime_type": "application/json"} if json_mode else {}
+    last_exc = None
+    for model in [MODEL_NAME, MODEL_FALLBACK]:
+        for attempt in range(3):
+            try:
+                resp = client_genai.models.generate_content(
+                    model=model, contents=prompt,
+                    config=cfg if cfg else None,
+                )
+                return resp.text
+            except Exception as e:
+                last_exc = e
+                transient = ("429" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e))
+                if transient and attempt < 2:
+                    wait = 30 * (attempt + 1)
+                    m = __import__('re').search(r'retry[^\d]*(\d+(?:\.\d+)?)\s*s', str(e), __import__('re').IGNORECASE)
+                    if m:
+                        wait = int(float(m.group(1))) + 5
+                    time.sleep(wait)
+                else:
+                    break  # 이 모델은 포기, 폴백 모델로
+    raise Exception(f"API 호출 실패 (모든 모델 시도): {last_exc}")
 
 # ============ [P0-A] Interactive Needs Gathering ============
 # 필수 정보 체크리스트
@@ -161,18 +177,10 @@ def generate_follow_up_questions(initial_query: str, industry: str, target: str,
 - 너무 길지 않게 (3~4개 질문만)
 """
 
-    for attempt in range(3):
-        try:
-            response = client_genai.models.generate_content(
-                model=MODEL_NAME,
-                contents=prompt
-            )
-            return response.text
-        except Exception as e:
-            if "429" in str(e) and attempt < 2:
-                time.sleep(30)
-            else:
-                return f"질문 생성 중 오류가 발생했습니다. 직접 입력해주세요.\n\n부족한 정보: {missing_questions_text}"
+    try:
+        return _generate(prompt)
+    except Exception:
+        return f"질문 생성 중 오류가 발생했습니다. 직접 입력해주세요.\n\n부족한 정보: {missing_questions_text}"
 
 
 # ============ [답변 2] 마크다운 → DOCX 변환 ============
@@ -349,12 +357,7 @@ UI 교육 대상(참고용): {target}
 }}"""
 
     try:
-        response = client_genai.models.generate_content(
-            model=MODEL_NAME,
-            contents=prompt,
-            config={"response_mime_type": "application/json"}
-        )
-        return json.loads(response.text)
+        return json.loads(_generate(prompt, json_mode=True))
     except Exception as e:
         # JSON 파싱 실패 시 기본값 반환
         return {
@@ -426,12 +429,7 @@ def _generate_search_queries(needs_json: dict) -> list:
 반드시 JSON 배열로만 응답: ["쿼리1", "쿼리2", "쿼리3"]"""
 
     try:
-        resp = client_genai.models.generate_content(
-            model=MODEL_NAME,
-            contents=prompt,
-            config={"response_mime_type": "application/json"}
-        )
-        queries = json.loads(resp.text)
+        queries = json.loads(_generate(prompt, json_mode=True))
         if isinstance(queries, list) and len(queries) >= 3:
             print(f"[검색 쿼리 생성] {queries}")
             return [str(q) for q in queries[:3]]
@@ -872,23 +870,11 @@ def assemble_curriculum(needs_json, grouped_modules, duration, retrieved_modules
     last_curriculum = None
 
     for quality_attempt in range(MAX_QUALITY_ATTEMPTS):
-        # API 호출 (Rate-limit 재시도 포함)
-        curriculum = None
-        for api_attempt in range(3):
-            try:
-                response = client_genai.models.generate_content(
-                    model=MODEL_NAME,
-                    contents=prompt
-                )
-                curriculum = response.text
-                break
-            except Exception as e:
-                if "429" in str(e) and api_attempt < 2:
-                    wait = 60 * (api_attempt + 1)
-                    st.warning(f"⏳ API 제한. {wait}초 후 재시도... ({api_attempt+1}/3)")
-                    time.sleep(wait)
-                else:
-                    raise e
+        # API 호출 (재시도 + 폴백 포함)
+        try:
+            curriculum = _generate(prompt)
+        except Exception as e:
+            raise Exception(f"API 호출에 실패했습니다: {e}")
 
         if curriculum is None:
             raise Exception("API 호출에 실패했습니다.")
@@ -1034,41 +1020,33 @@ def assemble_curriculum_ab(needs_json, retrieved_modules_json, duration, selecte
 ---DRAFT_B_END---
 """
 
-    for attempt in range(2):
-        try:
-            resp = client_genai.models.generate_content(model=MODEL_NAME, contents=prompt)
-            text = resp.text
+    try:
+        text = _generate(prompt)
+    except Exception as e:
+        raise Exception(f"A/B 제안서 생성 실패: {e}")
 
-            # CoT 파싱
-            cot_text = ""
-            if "## 💭 AI 설계 사고 과정" in text:
-                cot_start = text.index("## 💭 AI 설계 사고 과정")
-                cot_end   = text.index("---DRAFT_A_START---") if "---DRAFT_A_START---" in text else len(text)
-                cot_text  = text[cot_start:cot_end].strip()
+    # CoT 파싱
+    cot_text = ""
+    if "## 💭 AI 설계 사고 과정" in text:
+        cot_start = text.index("## 💭 AI 설계 사고 과정")
+        cot_end   = text.index("---DRAFT_A_START---") if "---DRAFT_A_START---" in text else len(text)
+        cot_text  = text[cot_start:cot_end].strip()
 
-            # A안 파싱
-            draft_a = ""
-            if "---DRAFT_A_START---" in text and "---DRAFT_A_END---" in text:
-                a_start = text.index("---DRAFT_A_START---") + len("---DRAFT_A_START---")
-                a_end   = text.index("---DRAFT_A_END---")
-                draft_a = text[a_start:a_end].strip()
+    # A안 파싱
+    draft_a = ""
+    if "---DRAFT_A_START---" in text and "---DRAFT_A_END---" in text:
+        a_start = text.index("---DRAFT_A_START---") + len("---DRAFT_A_START---")
+        a_end   = text.index("---DRAFT_A_END---")
+        draft_a = text[a_start:a_end].strip()
 
-            # B안 파싱
-            draft_b = ""
-            if "---DRAFT_B_START---" in text and "---DRAFT_B_END---" in text:
-                b_start = text.index("---DRAFT_B_START---") + len("---DRAFT_B_START---")
-                b_end   = text.index("---DRAFT_B_END---")
-                draft_b = text[b_start:b_end].strip()
+    # B안 파싱
+    draft_b = ""
+    if "---DRAFT_B_START---" in text and "---DRAFT_B_END---" in text:
+        b_start = text.index("---DRAFT_B_START---") + len("---DRAFT_B_START---")
+        b_end   = text.index("---DRAFT_B_END---")
+        draft_b = text[b_start:b_end].strip()
 
-            return cot_text, draft_a, draft_b
-
-        except Exception as e:
-            if ("429" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e)) and attempt == 0:
-                m = __import__('re').search(r'retry[^\d]*(\d+(?:\.\d+)?)\s*s', str(e), __import__('re').IGNORECASE)
-                wait = int(float(m.group(1))) + 5 if m else 30
-                time.sleep(wait)
-            else:
-                raise Exception(f"A/B 제안서 생성 실패: {e}")
+    return cot_text, draft_a, draft_b
 
 
 # ============ A/B 통합 최선 제안서 생성 ============
@@ -1151,22 +1129,10 @@ def combine_ab_proposals(proposal_a, proposal_b, user_opinion, needs_json, durat
 (모듈은 교육 시간에 따라 자유롭게 추가. 표 사용 절대 금지)
 """
 
-    curriculum = None
-    for api_attempt in range(2):
-        try:
-            response = client_genai.models.generate_content(model=MODEL_NAME, contents=prompt)
-            curriculum = response.text
-            break
-        except Exception as e:
-            if ("429" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e)) and api_attempt == 0:
-                m = __import__('re').search(r'retry[^\d]*(\d+(?:\.\d+)?)\s*s', str(e), __import__('re').IGNORECASE)
-                wait = int(float(m.group(1))) + 5 if m else 30
-                time.sleep(wait)
-            else:
-                raise e
-
-    if curriculum is None:
-        raise Exception("A/B 통합 제안서 생성에 실패했습니다.")
+    try:
+        curriculum = _generate(prompt)
+    except Exception as e:
+        raise Exception(f"A/B 통합 제안서 생성에 실패했습니다: {e}")
 
     timing_result = validate_curriculum_timing(curriculum, total_h)
     return curriculum, timing_result
@@ -1315,17 +1281,10 @@ def improve_proposal(original_proposal: str, review_result: dict,
 """
 
     cot_text = ""
-    for attempt in range(2):
-        try:
-            resp = client_genai.models.generate_content(model=MODEL_NAME, contents=cot_prompt)
-            cot_text = resp.text
-            break
-        except Exception as e:
-            if ("429" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e)) and attempt == 0:
-                time.sleep(30)
-            else:
-                cot_text = f"(사고 과정 생성 실패: {e})"
-                break
+    try:
+        cot_text = _generate(cot_prompt)
+    except Exception as e:
+        cot_text = f"(사고 과정 생성 실패: {e})"
 
     # 모듈 DB 전체 내용 (2단계 재작성용) — 토큰 절약: 내용_원문 400자 제한
     modules_section = ""
@@ -1403,17 +1362,10 @@ def improve_proposal(original_proposal: str, review_result: dict,
 
 (모듈은 교육 시간에 따라 자유롭게 추가. 표 사용 절대 금지)"""
 
-    improved = ""
-    for attempt in range(2):
-        try:
-            resp = client_genai.models.generate_content(model=MODEL_NAME, contents=rewrite_prompt)
-            improved = resp.text
-            break
-        except Exception as e:
-            if ("429" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e)) and attempt == 0:
-                time.sleep(30)
-            else:
-                raise e
+    try:
+        improved = _generate(rewrite_prompt)
+    except Exception as e:
+        raise Exception(f"제안서 재작성 실패: {e}")
 
     return cot_text, improved
 
