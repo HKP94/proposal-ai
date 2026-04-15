@@ -226,7 +226,7 @@ def generate_follow_up_questions(initial_query: str, industry: str, target: str,
 """
 
     try:
-        return _generate(prompt)
+        return _generate(prompt, heavy=True)
     except Exception:
         return f"질문 생성 중 오류가 발생했습니다. 직접 입력해주세요.\n\n부족한 정보: {missing_questions_text}"
 
@@ -405,7 +405,7 @@ UI 교육 대상(참고용): {target}
 }}"""
 
     try:
-        return json.loads(_generate(prompt, json_mode=True))
+        return json.loads(_generate(prompt, json_mode=True, heavy=True))
     except Exception as e:
         # JSON 파싱 실패 시 기본값 반환
         return {
@@ -477,7 +477,7 @@ def _generate_search_queries(needs_json: dict) -> list:
 반드시 JSON 배열로만 응답: ["쿼리1", "쿼리2", "쿼리3"]"""
 
     try:
-        queries = json.loads(_generate(prompt, json_mode=True))
+        queries = json.loads(_generate(prompt, json_mode=True, heavy=True))
         if isinstance(queries, list) and len(queries) >= 3:
             print(f"[검색 쿼리 생성] {queries}")
             return [str(q) for q in queries[:3]]
