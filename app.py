@@ -588,12 +588,7 @@ def search_modules_detailed(collection, needs_json, db_type):
 {{"0": {{"추천타겟": ["팀장/리더급"], "관련산업": ["금융/은행"]}}, "1": {{"추천타겟": ["전직급"], "관련산업": ["전산업"]}}}}"""
 
         try:
-            ctx_resp = client_genai.models.generate_content(
-                model=MODEL_NAME,
-                contents=ctx_prompt,
-                config={"response_mime_type": "application/json"}
-            )
-            ctx_result = json.loads(ctx_resp.text)
+            ctx_result = json.loads(_generate(ctx_prompt, json_mode=True))
             for i, m in enumerate(retrieved_modules):
                 if isinstance(ctx_result, list):
                     ctx = ctx_result[i] if i < len(ctx_result) else {}
@@ -1224,19 +1219,10 @@ def review_proposal(proposal_text: str, needs_json: dict) -> dict:
   "개선_지시문": "재생성 AI에게 전달할 구체적인 개선 지시 (2~4문장, 한국어)"
 }}"""
 
-    for attempt in range(2):
-        try:
-            response = client_genai.models.generate_content(
-                model=MODEL_NAME,
-                contents=prompt,
-                config={"response_mime_type": "application/json"}
-            )
-            return json.loads(response.text)
-        except Exception as e:
-            if ("429" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e)) and attempt == 0:
-                time.sleep(30)
-            else:
-                return {"총점": 0, "개선_지시문": str(e), "제출_가능_여부": "오류"}
+    try:
+        return json.loads(_generate(prompt, json_mode=True))
+    except Exception as e:
+        return {"총점": 0, "개선_지시문": str(e), "제출_가능_여부": "오류"}
 
 
 def improve_proposal(original_proposal: str, review_result: dict,
