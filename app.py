@@ -590,7 +590,7 @@ def search_modules_detailed(collection, needs_json, db_type):
 {{"0": {{"추천타겟": ["팀장/리더급"], "관련산업": ["금융/은행"]}}, "1": {{"추천타겟": ["전직급"], "관련산업": ["전산업"]}}}}"""
 
         try:
-            ctx_result = json.loads(_generate(ctx_prompt, json_mode=True))
+            ctx_result = json.loads(_generate(ctx_prompt, json_mode=True, heavy=True))
             for i, m in enumerate(retrieved_modules):
                 if isinstance(ctx_result, list):
                     ctx = ctx_result[i] if i < len(ctx_result) else {}
