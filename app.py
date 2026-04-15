@@ -59,20 +59,22 @@ def _rotate_key() -> bool:
 # 임베딩용 클라이언트 (첫 번째 키 고정 사용)
 client_genai = genai.Client(api_key=_API_KEYS[0])
 
-MODEL_NAME     = "gemini-2.5-flash-lite"
-MODEL_FALLBACK = "gemini-3.1-flash-lite-preview"
+MODEL_LITE   = "gemini-3.1-flash-lite-preview"   # Step 1~3: 니즈 분석, 모듈 검색
+MODEL_HEAVY  = "gemini-2.5-flash-lite"            # Step 4~6: 커리큘럼 설계, AI 검수, 재작성
 
-def _generate(prompt: str, json_mode: bool = False) -> str:
+def _generate(prompt: str, json_mode: bool = False, heavy: bool = False) -> str:
     """
     API 호출 공통 헬퍼.
+    - heavy=False(기본): MODEL_LITE(3.1) 우선, 실패 시 MODEL_HEAVY(2.5) 폴백
+    - heavy=True       : MODEL_HEAVY(2.5) 우선, 실패 시 MODEL_LITE(3.1) 폴백
     - 429(할당량 초과) → 다음 API 키로 자동 교체 후 재시도
     - 503 / UNAVAILABLE → 최대 3회 재시도 (지수 대기)
-    - 기본 모델 실패 시 폴백 모델로 추가 시도
     """
     cfg = {"response_mime_type": "application/json"} if json_mode else {}
     last_exc = None
+    model_order = [MODEL_HEAVY, MODEL_LITE] if heavy else [MODEL_LITE, MODEL_HEAVY]
 
-    for model in [MODEL_NAME, MODEL_FALLBACK]:
+    for model in model_order:
         for attempt in range(3):
             try:
                 client = _get_client()
@@ -913,7 +915,7 @@ def assemble_curriculum(needs_json, grouped_modules, duration, retrieved_modules
     for quality_attempt in range(MAX_QUALITY_ATTEMPTS):
         # API 호출 (재시도 + 폴백 포함)
         try:
-            curriculum = _generate(prompt)
+            curriculum = _generate(prompt, heavy=True)
         except Exception as e:
             raise Exception(f"API 호출에 실패했습니다: {e}")
 
@@ -1062,7 +1064,7 @@ def assemble_curriculum_ab(needs_json, retrieved_modules_json, duration, selecte
 """
 
     try:
-        text = _generate(prompt)
+        text = _generate(prompt, heavy=True)
     except Exception as e:
         raise Exception(f"A/B 제안서 생성 실패: {e}")
 
@@ -1171,7 +1173,7 @@ def combine_ab_proposals(proposal_a, proposal_b, user_opinion, needs_json, durat
 """
 
     try:
-        curriculum = _generate(prompt)
+        curriculum = _generate(prompt, heavy=True)
     except Exception as e:
         raise Exception(f"A/B 통합 제안서 생성에 실패했습니다: {e}")
 
@@ -1220,7 +1222,7 @@ def review_proposal(proposal_text: str, needs_json: dict) -> dict:
 }}"""
 
     try:
-        return json.loads(_generate(prompt, json_mode=True))
+        return json.loads(_generate(prompt, json_mode=True, heavy=True))
     except Exception as e:
         return {"총점": 0, "개선_지시문": str(e), "제출_가능_여부": "오류"}
 
@@ -1314,7 +1316,7 @@ def improve_proposal(original_proposal: str, review_result: dict,
 
     cot_text = ""
     try:
-        cot_text = _generate(cot_prompt)
+        cot_text = _generate(cot_prompt, heavy=True)
     except Exception as e:
         cot_text = f"(사고 과정 생성 실패: {e})"
 
@@ -1395,7 +1397,7 @@ def improve_proposal(original_proposal: str, review_result: dict,
 (모듈은 교육 시간에 따라 자유롭게 추가. 표 사용 절대 금지)"""
 
     try:
-        improved = _generate(rewrite_prompt)
+        improved = _generate(rewrite_prompt, heavy=True)
     except Exception as e:
         raise Exception(f"제안서 재작성 실패: {e}")
 
@@ -1481,7 +1483,7 @@ current_step = st.session_state.workflow_step
 
 # ── 사이드바 ──
 with st.sidebar:
-    st.caption(f"🤖 모델: `{MODEL_NAME}`")
+    st.caption(f"🤖 모델: `{MODEL_LITE}` / `{MODEL_HEAVY}`")
     _key_idx = st.session_state.get("api_key_index", 0)
     st.caption(f"🔑 API 키: {_key_idx + 1} / {len(_API_KEYS)}")
     st.divider()
