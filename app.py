@@ -23,7 +23,7 @@ LEGACY_DB_PATH = os.path.join(SCRIPT_DIR, "chroma_db")  # 구버전 폴백용
 # ── API 키 풀 로드 (GEMINI_API_KEY_1 ~ _9, 없으면 GEMINI_API_KEY 단일 키) ──
 def _load_api_keys() -> list:
     keys = []
-    for i in range(1, 10):
+    for i in range(1, 11):
         k = st.secrets.get(f"GEMINI_API_KEY_{i}") or os.getenv(f"GEMINI_API_KEY_{i}")
         if k:
             keys.append(k)
