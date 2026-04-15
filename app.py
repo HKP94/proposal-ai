@@ -26,7 +26,22 @@ if not API_KEY:
     st.stop()
 
 client_genai = genai.Client(api_key=API_KEY)
-MODEL_NAME = "gemini-2.5-flash-lite"
+
+def _resolve_model() -> str:
+    """사용 가능한 모델을 순서대로 확인하여 반환"""
+    for model in ["gemini-2.5-flash-lite", "gemini-3.1-flash-lite-preview"]:
+        try:
+            client_genai.models.generate_content(
+                model=model,
+                contents="ping",
+                config={"max_output_tokens": 1},
+            )
+            return model
+        except Exception:
+            continue
+    return "gemini-3.1-flash-lite-preview"
+
+MODEL_NAME = _resolve_model()
 
 # ============ [P0-A] Interactive Needs Gathering ============
 # 필수 정보 체크리스트
