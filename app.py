@@ -16,16 +16,48 @@ from docx.shared import Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
 # ============ 설정 ============
-API_KEY = st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MODULE_DB_PATH = os.path.join(SCRIPT_DIR, "module_db")
 LEGACY_DB_PATH = os.path.join(SCRIPT_DIR, "chroma_db")  # 구버전 폴백용
 
-if not API_KEY:
+# ── API 키 풀 로드 (GEMINI_API_KEY_1 ~ _9, 없으면 GEMINI_API_KEY 단일 키) ──
+def _load_api_keys() -> list:
+    keys = []
+    for i in range(1, 10):
+        k = st.secrets.get(f"GEMINI_API_KEY_{i}") or os.getenv(f"GEMINI_API_KEY_{i}")
+        if k:
+            keys.append(k)
+    if not keys:
+        single = st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
+        if single:
+            keys.append(single)
+    return keys
+
+_API_KEYS = _load_api_keys()
+
+if not _API_KEYS:
     st.error("❌ GEMINI_API_KEY가 설정되지 않았습니다. Streamlit Cloud → Settings → Secrets에 추가하세요.")
     st.stop()
 
-client_genai = genai.Client(api_key=API_KEY)
+# 현재 사용 중인 키 인덱스 (세션 내 유지)
+if "api_key_index" not in st.session_state:
+    st.session_state.api_key_index = 0
+
+def _get_client() -> genai.Client:
+    """현재 활성 키로 클라이언트 반환"""
+    idx = st.session_state.get("api_key_index", 0) % len(_API_KEYS)
+    return genai.Client(api_key=_API_KEYS[idx])
+
+def _rotate_key() -> bool:
+    """다음 키로 교체. 더 이상 키가 없으면 False 반환"""
+    current = st.session_state.get("api_key_index", 0)
+    if current + 1 < len(_API_KEYS):
+        st.session_state.api_key_index = current + 1
+        return True
+    return False
+
+# 임베딩용 클라이언트 (첫 번째 키 고정 사용)
+client_genai = genai.Client(api_key=_API_KEYS[0])
 
 MODEL_NAME     = "gemini-2.5-flash-lite"
 MODEL_FALLBACK = "gemini-3.1-flash-lite-preview"
@@ -33,31 +65,45 @@ MODEL_FALLBACK = "gemini-3.1-flash-lite-preview"
 def _generate(prompt: str, json_mode: bool = False) -> str:
     """
     API 호출 공통 헬퍼.
-    - 503 / 429 / UNAVAILABLE → 최대 3회 재시도 (지수 대기)
-    - 기본 모델 모두 실패 시 폴백 모델로 1회 추가 시도
+    - 429(할당량 초과) → 다음 API 키로 자동 교체 후 재시도
+    - 503 / UNAVAILABLE → 최대 3회 재시도 (지수 대기)
+    - 기본 모델 실패 시 폴백 모델로 추가 시도
     """
     cfg = {"response_mime_type": "application/json"} if json_mode else {}
     last_exc = None
+
     for model in [MODEL_NAME, MODEL_FALLBACK]:
         for attempt in range(3):
             try:
-                resp = client_genai.models.generate_content(
+                client = _get_client()
+                resp = client.models.generate_content(
                     model=model, contents=prompt,
                     config=cfg if cfg else None,
                 )
                 return resp.text
             except Exception as e:
                 last_exc = e
-                transient = ("429" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e))
-                if transient and attempt < 2:
-                    wait = 30 * (attempt + 1)
-                    m = __import__('re').search(r'retry[^\d]*(\d+(?:\.\d+)?)\s*s', str(e), __import__('re').IGNORECASE)
-                    if m:
-                        wait = int(float(m.group(1))) + 5
-                    time.sleep(wait)
+                err = str(e)
+                if "429" in err or "RESOURCE_EXHAUSTED" in err:
+                    # 할당량 초과 → 다음 키로 교체
+                    rotated = _rotate_key()
+                    if rotated:
+                        continue  # 새 키로 즉시 재시도
+                    else:
+                        break  # 키 소진, 폴백 모델로
+                elif "503" in err or "UNAVAILABLE" in err:
+                    if attempt < 2:
+                        wait = 30 * (attempt + 1)
+                        m = re.search(r'retry[^\d]*(\d+(?:\.\d+)?)\s*s', err, re.IGNORECASE)
+                        if m:
+                            wait = int(float(m.group(1))) + 5
+                        time.sleep(wait)
+                    else:
+                        break  # 폴백 모델로
                 else:
-                    break  # 이 모델은 포기, 폴백 모델로
-    raise Exception(f"API 호출 실패 (모든 모델 시도): {last_exc}")
+                    break  # 다른 오류는 즉시 폴백 모델로
+
+    raise Exception(f"API 호출 실패 (모든 키·모델 시도): {last_exc}")
 
 # ============ [P0-A] Interactive Needs Gathering ============
 # 필수 정보 체크리스트
@@ -1450,6 +1496,8 @@ current_step = st.session_state.workflow_step
 # ── 사이드바 ──
 with st.sidebar:
     st.caption(f"🤖 모델: `{MODEL_NAME}`")
+    _key_idx = st.session_state.get("api_key_index", 0)
+    st.caption(f"🔑 API 키: {_key_idx + 1} / {len(_API_KEYS)}")
     st.divider()
     if st.button("🔄 처음부터 다시 시작", use_container_width=True):
         for _k in list(_DEFAULTS.keys()):
