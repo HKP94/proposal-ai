@@ -9,7 +9,7 @@
 | 파일/폴더 | 역할 | git 추적 |
 |---|---|---|
 | `app.py` | Streamlit 앱 메인 (배포용) | ✅ |
-| `module_db/` | ChromaDB 벡터 DB (앱 실행 필수, 2,474개 모듈) | ✅ |
+| `module_db/` | ChromaDB 벡터 DB (앱 실행 필수, 2,845개 모듈) | ✅ |
 | `requirements.txt` | 패키지 의존성 | ✅ |
 | `step1_extract.py` | raw_data JSON 추출 (로컬 전용) | ❌ |
 | `step2_structure.py` | JSON 구조화 (로컬 전용) | ❌ |
@@ -46,7 +46,7 @@
 
 ## module_db 현황
 
-- **모듈 수**: 2,474개 (원본 2,399 + 신규 75개)
+- **모듈 수**: 2,845개 (기존 2,399 + 2024 신규 454개 - 빈 콘텐츠 8개 제거)
 - **임베딩 모델**: `gemini-embedding-001` (실제 차원: 3,072)
 - **컬렉션 UUID**: `751bd8a9-2e00-43b9-bd4b-56601fdb19d8`
 - **HNSW segment**: `ac52b33d-0b52-487a-9f22-b3e9c4623d19`
