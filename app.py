@@ -59,7 +59,7 @@ def _rotate_key() -> bool:
 # 임베딩용 클라이언트 (첫 번째 키 고정 사용)
 client_genai = genai.Client(api_key=_API_KEYS[0])
 
-MODEL_LITE   = "gemini-3.1-flash-lite-preview"   # Step 1~3: 니즈 분석, 모듈 검색
+MODEL_LITE   = "gemini-3.1-flash-lite"   # Step 1~3: 니즈 분석, 모듈 검색
 MODEL_HEAVY  = "gemini-2.5-flash-lite"            # Step 4~6: 커리큘럼 설계, AI 검수, 재작성
 
 def _generate(prompt: str, json_mode: bool = False, heavy: bool = False) -> str:
