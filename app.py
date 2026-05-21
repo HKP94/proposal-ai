@@ -16,17 +16,96 @@ from docx.shared import Pt, RGBColor
 from docx.enum.text import WD_ALIGN_PARAGRAPH
 
 # ============ 설정 ============
-API_KEY = st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 MODULE_DB_PATH = os.path.join(SCRIPT_DIR, "module_db")
 LEGACY_DB_PATH = os.path.join(SCRIPT_DIR, "chroma_db")  # 구버전 폴백용
 
-if not API_KEY:
+# ── API 키 풀 로드 (GEMINI_API_KEY_1 ~ _9, 없으면 GEMINI_API_KEY 단일 키) ──
+def _load_api_keys() -> list:
+    keys = []
+    for i in range(1, 11):
+        k = st.secrets.get(f"GEMINI_API_KEY_{i}") or os.getenv(f"GEMINI_API_KEY_{i}")
+        if k:
+            keys.append(k)
+    if not keys:
+        single = st.secrets.get("GEMINI_API_KEY") or os.getenv("GEMINI_API_KEY")
+        if single:
+            keys.append(single)
+    return keys
+
+_API_KEYS = _load_api_keys()
+
+if not _API_KEYS:
     st.error("❌ GEMINI_API_KEY가 설정되지 않았습니다. Streamlit Cloud → Settings → Secrets에 추가하세요.")
     st.stop()
 
-client_genai = genai.Client(api_key=API_KEY)
-MODEL_NAME = "gemini-2.5-flash-lite"
+# 현재 사용 중인 키 인덱스 (세션 내 유지)
+if "api_key_index" not in st.session_state:
+    st.session_state.api_key_index = 0
+
+def _get_client() -> genai.Client:
+    """현재 활성 키로 클라이언트 반환"""
+    idx = st.session_state.get("api_key_index", 0) % len(_API_KEYS)
+    return genai.Client(api_key=_API_KEYS[idx])
+
+def _rotate_key() -> bool:
+    """다음 키로 교체. 더 이상 키가 없으면 False 반환"""
+    current = st.session_state.get("api_key_index", 0)
+    if current + 1 < len(_API_KEYS):
+        st.session_state.api_key_index = current + 1
+        return True
+    return False
+
+# 임베딩용 클라이언트 (첫 번째 키 고정 사용)
+client_genai = genai.Client(api_key=_API_KEYS[0])
+
+MODEL_LITE   = "gemini-3.1-flash-lite"   # Step 1~3: 니즈 분석, 모듈 검색
+MODEL_HEAVY  = "gemini-2.5-flash-lite"            # Step 4~6: 커리큘럼 설계, AI 검수, 재작성
+
+def _generate(prompt: str, json_mode: bool = False, heavy: bool = False) -> str:
+    """
+    API 호출 공통 헬퍼.
+    - heavy=False(기본): MODEL_LITE(3.1) 우선, 실패 시 MODEL_HEAVY(2.5) 폴백
+    - heavy=True       : MODEL_HEAVY(2.5) 우선, 실패 시 MODEL_LITE(3.1) 폴백
+    - 429(할당량 초과) → 다음 API 키로 자동 교체 후 재시도
+    - 503 / UNAVAILABLE → 최대 3회 재시도 (지수 대기)
+    """
+    cfg = {"response_mime_type": "application/json"} if json_mode else {}
+    last_exc = None
+    model_order = [MODEL_HEAVY, MODEL_LITE] if heavy else [MODEL_LITE, MODEL_HEAVY]
+
+    for model in model_order:
+        for attempt in range(3):
+            try:
+                client = _get_client()
+                resp = client.models.generate_content(
+                    model=model, contents=prompt,
+                    config=cfg if cfg else None,
+                )
+                return resp.text
+            except Exception as e:
+                last_exc = e
+                err = str(e)
+                if "429" in err or "RESOURCE_EXHAUSTED" in err:
+                    # 할당량 초과 → 다음 키로 교체
+                    rotated = _rotate_key()
+                    if rotated:
+                        continue  # 새 키로 즉시 재시도
+                    else:
+                        break  # 키 소진, 폴백 모델로
+                elif "503" in err or "UNAVAILABLE" in err:
+                    if attempt < 2:
+                        wait = 30 * (attempt + 1)
+                        m = re.search(r'retry[^\d]*(\d+(?:\.\d+)?)\s*s', err, re.IGNORECASE)
+                        if m:
+                            wait = int(float(m.group(1))) + 5
+                        time.sleep(wait)
+                    else:
+                        break  # 폴백 모델로
+                else:
+                    break  # 다른 오류는 즉시 폴백 모델로
+
+    raise Exception(f"API 호출 실패 (모든 키·모델 시도): {last_exc}")
 
 # ============ [P0-A] Interactive Needs Gathering ============
 # 필수 정보 체크리스트
@@ -146,18 +225,10 @@ def generate_follow_up_questions(initial_query: str, industry: str, target: str,
 - 너무 길지 않게 (3~4개 질문만)
 """
 
-    for attempt in range(3):
-        try:
-            response = client_genai.models.generate_content(
-                model=MODEL_NAME,
-                contents=prompt
-            )
-            return response.text
-        except Exception as e:
-            if "429" in str(e) and attempt < 2:
-                time.sleep(30)
-            else:
-                return f"질문 생성 중 오류가 발생했습니다. 직접 입력해주세요.\n\n부족한 정보: {missing_questions_text}"
+    try:
+        return _generate(prompt, heavy=True)
+    except Exception:
+        return f"질문 생성 중 오류가 발생했습니다. 직접 입력해주세요.\n\n부족한 정보: {missing_questions_text}"
 
 
 # ============ [답변 2] 마크다운 → DOCX 변환 ============
@@ -334,12 +405,7 @@ UI 교육 대상(참고용): {target}
 }}"""
 
     try:
-        response = client_genai.models.generate_content(
-            model=MODEL_NAME,
-            contents=prompt,
-            config={"response_mime_type": "application/json"}
-        )
-        return json.loads(response.text)
+        return json.loads(_generate(prompt, json_mode=True, heavy=True))
     except Exception as e:
         # JSON 파싱 실패 시 기본값 반환
         return {
@@ -411,12 +477,7 @@ def _generate_search_queries(needs_json: dict) -> list:
 반드시 JSON 배열로만 응답: ["쿼리1", "쿼리2", "쿼리3"]"""
 
     try:
-        resp = client_genai.models.generate_content(
-            model=MODEL_NAME,
-            contents=prompt,
-            config={"response_mime_type": "application/json"}
-        )
-        queries = json.loads(resp.text)
+        queries = json.loads(_generate(prompt, json_mode=True, heavy=True))
         if isinstance(queries, list) and len(queries) >= 3:
             print(f"[검색 쿼리 생성] {queries}")
             return [str(q) for q in queries[:3]]
@@ -529,12 +590,7 @@ def search_modules_detailed(collection, needs_json, db_type):
 {{"0": {{"추천타겟": ["팀장/리더급"], "관련산업": ["금융/은행"]}}, "1": {{"추천타겟": ["전직급"], "관련산업": ["전산업"]}}}}"""
 
         try:
-            ctx_resp = client_genai.models.generate_content(
-                model=MODEL_NAME,
-                contents=ctx_prompt,
-                config={"response_mime_type": "application/json"}
-            )
-            ctx_result = json.loads(ctx_resp.text)
+            ctx_result = json.loads(_generate(ctx_prompt, json_mode=True, heavy=True))
             for i, m in enumerate(retrieved_modules):
                 if isinstance(ctx_result, list):
                     ctx = ctx_result[i] if i < len(ctx_result) else {}
@@ -857,23 +913,11 @@ def assemble_curriculum(needs_json, grouped_modules, duration, retrieved_modules
     last_curriculum = None
 
     for quality_attempt in range(MAX_QUALITY_ATTEMPTS):
-        # API 호출 (Rate-limit 재시도 포함)
-        curriculum = None
-        for api_attempt in range(3):
-            try:
-                response = client_genai.models.generate_content(
-                    model=MODEL_NAME,
-                    contents=prompt
-                )
-                curriculum = response.text
-                break
-            except Exception as e:
-                if "429" in str(e) and api_attempt < 2:
-                    wait = 60 * (api_attempt + 1)
-                    st.warning(f"⏳ API 제한. {wait}초 후 재시도... ({api_attempt+1}/3)")
-                    time.sleep(wait)
-                else:
-                    raise e
+        # API 호출 (재시도 + 폴백 포함)
+        try:
+            curriculum = _generate(prompt, heavy=True)
+        except Exception as e:
+            raise Exception(f"API 호출에 실패했습니다: {e}")
 
         if curriculum is None:
             raise Exception("API 호출에 실패했습니다.")
@@ -1019,41 +1063,33 @@ def assemble_curriculum_ab(needs_json, retrieved_modules_json, duration, selecte
 ---DRAFT_B_END---
 """
 
-    for attempt in range(2):
-        try:
-            resp = client_genai.models.generate_content(model=MODEL_NAME, contents=prompt)
-            text = resp.text
+    try:
+        text = _generate(prompt, heavy=True)
+    except Exception as e:
+        raise Exception(f"A/B 제안서 생성 실패: {e}")
 
-            # CoT 파싱
-            cot_text = ""
-            if "## 💭 AI 설계 사고 과정" in text:
-                cot_start = text.index("## 💭 AI 설계 사고 과정")
-                cot_end   = text.index("---DRAFT_A_START---") if "---DRAFT_A_START---" in text else len(text)
-                cot_text  = text[cot_start:cot_end].strip()
+    # CoT 파싱
+    cot_text = ""
+    if "## 💭 AI 설계 사고 과정" in text:
+        cot_start = text.index("## 💭 AI 설계 사고 과정")
+        cot_end   = text.index("---DRAFT_A_START---") if "---DRAFT_A_START---" in text else len(text)
+        cot_text  = text[cot_start:cot_end].strip()
 
-            # A안 파싱
-            draft_a = ""
-            if "---DRAFT_A_START---" in text and "---DRAFT_A_END---" in text:
-                a_start = text.index("---DRAFT_A_START---") + len("---DRAFT_A_START---")
-                a_end   = text.index("---DRAFT_A_END---")
-                draft_a = text[a_start:a_end].strip()
+    # A안 파싱
+    draft_a = ""
+    if "---DRAFT_A_START---" in text and "---DRAFT_A_END---" in text:
+        a_start = text.index("---DRAFT_A_START---") + len("---DRAFT_A_START---")
+        a_end   = text.index("---DRAFT_A_END---")
+        draft_a = text[a_start:a_end].strip()
 
-            # B안 파싱
-            draft_b = ""
-            if "---DRAFT_B_START---" in text and "---DRAFT_B_END---" in text:
-                b_start = text.index("---DRAFT_B_START---") + len("---DRAFT_B_START---")
-                b_end   = text.index("---DRAFT_B_END---")
-                draft_b = text[b_start:b_end].strip()
+    # B안 파싱
+    draft_b = ""
+    if "---DRAFT_B_START---" in text and "---DRAFT_B_END---" in text:
+        b_start = text.index("---DRAFT_B_START---") + len("---DRAFT_B_START---")
+        b_end   = text.index("---DRAFT_B_END---")
+        draft_b = text[b_start:b_end].strip()
 
-            return cot_text, draft_a, draft_b
-
-        except Exception as e:
-            if ("429" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e)) and attempt == 0:
-                m = __import__('re').search(r'retry[^\d]*(\d+(?:\.\d+)?)\s*s', str(e), __import__('re').IGNORECASE)
-                wait = int(float(m.group(1))) + 5 if m else 30
-                time.sleep(wait)
-            else:
-                raise Exception(f"A/B 제안서 생성 실패: {e}")
+    return cot_text, draft_a, draft_b
 
 
 # ============ A/B 통합 최선 제안서 생성 ============
@@ -1136,22 +1172,10 @@ def combine_ab_proposals(proposal_a, proposal_b, user_opinion, needs_json, durat
 (모듈은 교육 시간에 따라 자유롭게 추가. 표 사용 절대 금지)
 """
 
-    curriculum = None
-    for api_attempt in range(2):
-        try:
-            response = client_genai.models.generate_content(model=MODEL_NAME, contents=prompt)
-            curriculum = response.text
-            break
-        except Exception as e:
-            if ("429" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e)) and api_attempt == 0:
-                m = __import__('re').search(r'retry[^\d]*(\d+(?:\.\d+)?)\s*s', str(e), __import__('re').IGNORECASE)
-                wait = int(float(m.group(1))) + 5 if m else 30
-                time.sleep(wait)
-            else:
-                raise e
-
-    if curriculum is None:
-        raise Exception("A/B 통합 제안서 생성에 실패했습니다.")
+    try:
+        curriculum = _generate(prompt, heavy=True)
+    except Exception as e:
+        raise Exception(f"A/B 통합 제안서 생성에 실패했습니다: {e}")
 
     timing_result = validate_curriculum_timing(curriculum, total_h)
     return curriculum, timing_result
@@ -1197,19 +1221,10 @@ def review_proposal(proposal_text: str, needs_json: dict) -> dict:
   "개선_지시문": "재생성 AI에게 전달할 구체적인 개선 지시 (2~4문장, 한국어)"
 }}"""
 
-    for attempt in range(2):
-        try:
-            response = client_genai.models.generate_content(
-                model=MODEL_NAME,
-                contents=prompt,
-                config={"response_mime_type": "application/json"}
-            )
-            return json.loads(response.text)
-        except Exception as e:
-            if ("429" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e)) and attempt == 0:
-                time.sleep(30)
-            else:
-                return {"총점": 0, "개선_지시문": str(e), "제출_가능_여부": "오류"}
+    try:
+        return json.loads(_generate(prompt, json_mode=True, heavy=True))
+    except Exception as e:
+        return {"총점": 0, "개선_지시문": str(e), "제출_가능_여부": "오류"}
 
 
 def improve_proposal(original_proposal: str, review_result: dict,
@@ -1300,17 +1315,10 @@ def improve_proposal(original_proposal: str, review_result: dict,
 """
 
     cot_text = ""
-    for attempt in range(2):
-        try:
-            resp = client_genai.models.generate_content(model=MODEL_NAME, contents=cot_prompt)
-            cot_text = resp.text
-            break
-        except Exception as e:
-            if ("429" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e)) and attempt == 0:
-                time.sleep(30)
-            else:
-                cot_text = f"(사고 과정 생성 실패: {e})"
-                break
+    try:
+        cot_text = _generate(cot_prompt, heavy=True)
+    except Exception as e:
+        cot_text = f"(사고 과정 생성 실패: {e})"
 
     # 모듈 DB 전체 내용 (2단계 재작성용) — 토큰 절약: 내용_원문 400자 제한
     modules_section = ""
@@ -1388,17 +1396,10 @@ def improve_proposal(original_proposal: str, review_result: dict,
 
 (모듈은 교육 시간에 따라 자유롭게 추가. 표 사용 절대 금지)"""
 
-    improved = ""
-    for attempt in range(2):
-        try:
-            resp = client_genai.models.generate_content(model=MODEL_NAME, contents=rewrite_prompt)
-            improved = resp.text
-            break
-        except Exception as e:
-            if ("429" in str(e) or "503" in str(e) or "UNAVAILABLE" in str(e)) and attempt == 0:
-                time.sleep(30)
-            else:
-                raise e
+    try:
+        improved = _generate(rewrite_prompt, heavy=True)
+    except Exception as e:
+        raise Exception(f"제안서 재작성 실패: {e}")
 
     return cot_text, improved
 
@@ -1420,29 +1421,262 @@ def replace_placeholders(text: str, company_name: str) -> tuple:
     return result, remaining
 
 
-# ============ Streamlit UI v3.0 ============
-st.set_page_config(page_title="제안서 AI 어시스턴트", page_icon="📋", layout="wide")
+# ============ Streamlit UI — Editorial Design System ============
+st.set_page_config(page_title="제안서 AI", page_icon="📋", layout="wide", initial_sidebar_state="expanded")
 
 st.markdown("""
 <style>
-.needs-box {
-    background: #f0f4ff; border-left: 4px solid #4a6cf7;
-    padding: 12px; border-radius: 6px; margin: 8px 0;
+@import url("https://cdn.jsdelivr.net/gh/orioncactus/pretendard@v1.3.9/dist/web/variable/pretendardvariable.min.css");
+@import url("https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap");
+
+:root {
+  --canvas:#FAFBFC; --surface:#FFFFFF; --surface-2:#F4F6F8; --tint:#EEF0F3;
+  --ink:#0F1419; --ink-2:#4A5568; --ink-3:#94A3B8;
+  --line:#ECEEF1; --line-2:#DDE1E6; --line-strong:#C7CCD3;
+  --acc:#2A5BFF; --acc-hover:#1A48EA; --acc-soft:rgba(42,91,255,0.08);
+  --ok:#15803D; --warn:#B45309; --bad:#B91C1C;
+  --ok-bg:#F0FDF4; --warn-bg:#FFFBEB; --bad-bg:#FEF2F2;
+  --sans:"Pretendard Variable","Pretendard",-apple-system,BlinkMacSystemFont,"Segoe UI","Apple SD Gothic Neo","Noto Sans KR",system-ui,sans-serif;
+  --mono:"JetBrains Mono","SF Mono","Menlo","Consolas",monospace;
+  --shadow-card:0 1px 2px rgba(15,23,42,0.04),0 1px 3px rgba(15,23,42,0.06);
+  --radius-sm:4px; --radius-md:6px; --radius-lg:10px; --radius-pill:999px;
+  --dur-quick:160ms; --ease:cubic-bezier(0.2,0.7,0.2,1);
 }
-.module-card {
-    background: #f9fafb; border: 1px solid #e5e7eb;
-    padding: 10px; border-radius: 6px; margin: 4px 0; font-size: 0.9em;
+
+/* ── Streamlit 기본 재정의 ── */
+header[data-testid="stHeader"] { display:none !important; }
+#MainMenu { display:none !important; }
+.stApp { background:var(--canvas) !important; font-family:var(--sans) !important; }
+.block-container { padding-top:2rem !important; }
+section[data-testid="stSidebar"] { background:var(--surface) !important; border-right:1px solid var(--line) !important; }
+section[data-testid="stSidebar"] > div,
+section[data-testid="stSidebar"] > div > div { padding-top:0 !important; margin-top:0 !important; }
+section[data-testid="stSidebar"] > div { padding-left:16px !important; padding-right:16px !important; padding-bottom:20px !important; }
+/* 사이드바 항상 표시 + 닫기 버튼 숨김 */
+div[data-testid="stSidebarCollapseButton"] { display:none !important; }
+button[data-testid="collapsedControl"] { display:none !important; }
+section[data-testid="stSidebar"] {
+    display:block !important;
+    visibility:visible !important;
+    transform:none !important;
+    min-width:244px !important;
+    margin-left:0 !important;
 }
-.step-done {
-    background: #f0fdf4; border: 1px solid #86efac;
-    padding: 8px 14px; border-radius: 6px;
-    color: #15803d; font-size: 0.9em; margin: 4px 0;
+section[data-testid="stSidebar"][aria-expanded="false"] {
+    display:block !important;
+    transform:translateX(0) !important;
 }
+.block-container { padding:2rem 3.5rem 6rem !important; max-width:960px !important; }
+
+.stButton > button {
+  font-family:var(--sans) !important; font-weight:600 !important; font-size:14px !important;
+  border-radius:var(--radius-md) !important; height:38px !important; padding:0 20px !important;
+  border:1px solid var(--line-2) !important; background:var(--surface) !important; color:var(--ink) !important;
+  transition:all var(--dur-quick) var(--ease) !important;
+}
+.stButton > button:hover { border-color:var(--ink-2) !important; background:var(--surface-2) !important; }
+.stButton > button[kind="primary"] { background:var(--acc) !important; border-color:var(--acc) !important; color:#fff !important; box-shadow:0 1px 2px rgba(42,91,255,0.18) !important; }
+.stButton > button[kind="primary"]:hover { background:var(--acc-hover) !important; border-color:var(--acc-hover) !important; }
+.stButton > button:disabled { opacity:0.45 !important; cursor:not-allowed !important; }
+
+.stTextArea textarea, .stTextInput input, .stNumberInput input {
+  font-family:var(--sans) !important; font-size:15px !important;
+  border:1px solid var(--line-2) !important; border-radius:var(--radius-md) !important;
+  background:var(--surface) !important; color:var(--ink) !important;
+}
+.stTextArea textarea:focus, .stTextInput input:focus {
+  border-color:var(--acc) !important; box-shadow:0 0 0 3px var(--acc-soft) !important;
+}
+.stTextArea label,.stTextInput label,.stNumberInput label,.stSelectbox label,.stCheckbox label {
+  font-family:var(--sans) !important; font-size:12.5px !important;
+  font-weight:600 !important; color:var(--ink) !important;
+}
+hr { border-color:var(--line) !important; margin:32px 0 !important; }
+.stChatMessage { border-radius:var(--radius-md) !important; font-family:var(--sans) !important; }
+.stMetric label { font-family:var(--mono) !important; font-size:10.5px !important; text-transform:uppercase !important; letter-spacing:0.08em !important; color:var(--ink-3) !important; }
+.stProgress > div { background:var(--tint) !important; border-radius:999px !important; height:5px !important; }
+.stProgress > div > div { background:var(--acc) !important; border-radius:999px !important; }
+.streamlit-expanderHeader { font-family:var(--mono) !important; font-size:11px !important; letter-spacing:0.07em !important; text-transform:uppercase !important; }
+
+/* ── 커스텀 컴포넌트 ── */
+.pai-topbar { display:flex; align-items:center; justify-content:space-between; margin-bottom:36px; padding-bottom:18px; border-bottom:1px solid var(--line); }
+.pai-brand { display:inline-flex; align-items:baseline; gap:8px; font-weight:800; font-size:16px; letter-spacing:-0.022em; color:var(--ink); }
+.pai-brand .bm { width:22px; height:22px; display:inline-flex; align-items:center; justify-content:center; background:var(--ink); color:#fff; font-style:italic; font-size:15px; line-height:1; border-radius:4px; }
+.pai-brand .lt { font-weight:500; color:var(--ink-2); }
+.pai-session { font-family:var(--mono); font-size:11px; color:var(--ink-2); letter-spacing:0.04em; display:inline-flex; align-items:center; gap:7px; padding:5px 10px; background:var(--surface-2); border-radius:999px; border:1px solid var(--line); }
+.pai-session .dot { width:6px; height:6px; border-radius:50%; background:var(--ok); display:inline-block; }
+
+.pai-section-head { display:grid; grid-template-columns:72px 1fr; align-items:start; gap:20px; margin-bottom:28px; }
+.pai-section-num { font-weight:800; font-size:52px; line-height:0.95; letter-spacing:-0.03em; color:var(--acc); font-variant-numeric:tabular-nums; }
+.pai-section-title { font-size:26px; line-height:1.2; font-weight:700; letter-spacing:-0.022em; margin:6px 0 6px; color:var(--ink); }
+.pai-section-sub { font-size:14px; line-height:1.6; color:var(--ink-2); margin:0; }
+
+.pai-step-collapsed { display:grid; grid-template-columns:52px 1fr; align-items:center; gap:16px; padding:14px 20px; background:var(--surface); border:1px solid var(--line); border-radius:var(--radius-md); margin:0 0 14px; box-shadow:var(--shadow-card); }
+.pai-sc-n { font-weight:700; font-size:13px; width:28px; height:28px; display:inline-flex; align-items:center; justify-content:center; background:var(--ink); color:#fff; border-radius:999px; font-variant-numeric:tabular-nums; }
+.pai-sc-label { font-family:var(--mono); font-size:10.5px; color:var(--ink-2); letter-spacing:0.08em; text-transform:uppercase; margin-bottom:4px; font-weight:500; }
+.pai-sc-summary { font-size:14px; color:var(--ink); line-height:1.45; letter-spacing:-0.005em; }
+
+.pai-summary { border:1px solid var(--line); border-radius:var(--radius-md); background:var(--surface); overflow:hidden; box-shadow:var(--shadow-card); margin-bottom:24px; }
+.pai-sum-row { display:grid; grid-template-columns:140px 1fr; align-items:start; gap:20px; padding:14px 20px; border-top:1px solid var(--line); }
+.pai-sum-row:first-child { border-top:none; }
+.pai-sum-k { font-family:var(--sans); font-size:12.5px; color:var(--ink-2); font-weight:500; }
+.pai-sum-v { font-size:15px; line-height:1.45; color:var(--ink); font-weight:500; letter-spacing:-0.011em; }
+.pai-sum-v .muted { color:var(--ink-2); font-weight:400; }
+.pai-tag-row { display:flex; gap:6px; flex-wrap:wrap; margin-top:2px; }
+.pai-tag { font-size:12px; font-weight:500; padding:3px 10px; border:1px solid var(--line-2); border-radius:999px; color:var(--ink); background:var(--surface-2); white-space:nowrap; }
+
+.pai-info-head { display:flex; align-items:baseline; justify-content:space-between; margin:0 0 10px; }
+.pai-info-count { font-size:14px; font-weight:600; color:var(--ink); }
+.pai-info-count em { font-style:normal; color:var(--acc); font-weight:700; margin-right:4px; }
+.pai-info-sort { font-family:var(--mono); font-size:10.5px; color:var(--ink-3); letter-spacing:0.08em; text-transform:uppercase; }
+.pai-mod-table { border:1px solid var(--line); border-radius:var(--radius-md); background:var(--surface); overflow:hidden; box-shadow:var(--shadow-card); margin-bottom:8px; }
+.pai-mod-thead { display:grid; grid-template-columns:1fr 70px; gap:16px; padding:10px 20px 10px 56px; background:var(--surface-2); border-bottom:1px solid var(--line); font-family:var(--mono); font-size:10px; color:var(--ink-2); letter-spacing:0.1em; text-transform:uppercase; font-weight:500; }
+.pai-mod-thead .sc { text-align:right; }
+.pai-mod-info { padding:12px 20px 12px 0; }
+.pai-mod-rank { font-family:var(--mono); font-weight:600; font-size:12px; color:var(--ink-3); }
+.pai-mod-title { font-size:14.5px; font-weight:600; color:var(--ink); letter-spacing:-0.011em; margin-bottom:4px; }
+.pai-mod-desc { font-size:12.5px; color:var(--ink-2); display:flex; gap:7px; flex-wrap:wrap; align-items:center; }
+.pai-mod-pip { width:3px; height:3px; background:var(--ink-3); border-radius:50%; display:inline-block; }
+.pai-mod-sim { font-weight:700; font-size:20px; color:var(--ink); letter-spacing:-0.018em; line-height:1; text-align:right; font-variant-numeric:tabular-nums; }
+.pai-mod-sim .pct { font-family:var(--mono); font-size:9.5px; color:var(--ink-3); display:block; margin-top:3px; letter-spacing:0.06em; text-transform:uppercase; }
+.pai-ttag { background:#E8F4F8; color:#1A6B9E; padding:2px 9px; border-radius:10px; font-size:0.76rem; border:1px solid #B8D9EE; white-space:nowrap; }
+.pai-itag { background:#F0F8E8; color:#2D6A1E; padding:2px 9px; border-radius:10px; font-size:0.76rem; border:1px solid #B8D9B8; white-space:nowrap; }
+
+.pai-modes { display:grid; grid-template-columns:1fr 1fr; gap:12px; margin-top:12px; }
+.pai-mode { border:1px solid var(--line-2); border-radius:var(--radius-md); padding:18px 20px; background:var(--surface); position:relative; }
+.pai-mode.active { border-color:var(--acc); box-shadow:0 0 0 3px var(--acc-soft); }
+.pai-mode .badge { font-family:var(--mono); font-size:11px; color:var(--ink-3); letter-spacing:0.08em; text-transform:uppercase; font-weight:500; margin-right:8px; }
+.pai-mode h5 { margin:0 0 6px; font-size:16px; font-weight:700; color:var(--ink); }
+.pai-mode p { margin:0; font-size:13px; color:var(--ink-2); line-height:1.55; }
+.pai-mode .chk { position:absolute; top:14px; right:16px; font-size:11.5px; color:var(--acc); font-weight:600; }
+
+.pai-meta-bar { display:grid; grid-template-columns:repeat(4,1fr); border:1px solid var(--line); background:var(--surface); border-radius:var(--radius-md); padding:16px 0; margin-bottom:24px; box-shadow:var(--shadow-card); }
+.pai-meta-bar > div { padding:0 20px; border-right:1px solid var(--line); }
+.pai-meta-bar > div:last-child { border-right:none; }
+.pai-meta-k { font-family:var(--mono); font-size:10px; color:var(--ink-2); letter-spacing:0.08em; text-transform:uppercase; margin-bottom:6px; font-weight:500; }
+.pai-meta-v { font-size:18px; font-weight:700; letter-spacing:-0.018em; font-variant-numeric:tabular-nums; }
+.pai-meta-v .m { color:var(--ink-2); font-weight:400; margin-left:4px; font-size:14px; }
+
+.pai-score-block { display:grid; grid-template-columns:200px 1fr; gap:40px; align-items:center; padding:28px 32px; margin:0 0 16px; background:var(--surface); border:1px solid var(--line); border-radius:var(--radius-md); box-shadow:var(--shadow-card); }
+.pai-score-num { font-weight:800; font-size:92px; line-height:0.9; letter-spacing:-0.04em; font-variant-numeric:tabular-nums; }
+.pai-score-num.hi { color:var(--ok); } .pai-score-num.md { color:var(--warn); } .pai-score-num.lo { color:var(--bad); }
+.pai-score-deno { font-family:var(--mono); font-size:11px; color:var(--ink-2); letter-spacing:0.08em; text-transform:uppercase; margin-top:8px; font-weight:500; }
+.pai-score-bars { display:flex; flex-direction:column; gap:14px; }
+.pai-score-row { display:grid; grid-template-columns:1fr 55px; gap:10px; align-items:baseline; }
+.pai-score-lbl { font-size:13.5px; font-weight:500; color:var(--ink); }
+.pai-score-val { font-family:var(--mono); font-size:11px; color:var(--ink-2); text-align:right; font-weight:500; }
+.pai-score-track { grid-column:1/-1; height:5px; background:var(--tint); border-radius:999px; overflow:hidden; position:relative; }
+.pai-score-fill { position:absolute; top:0; left:0; height:100%; background:var(--acc); border-radius:999px; }
+.pai-verdict { padding:14px 20px; background:var(--surface); border:1px solid var(--line); border-radius:var(--radius-md); display:grid; grid-template-columns:140px 1fr; gap:16px; align-items:center; margin-bottom:20px; }
+.pai-verdict-k { font-family:var(--mono); font-size:10.5px; color:var(--ink-2); letter-spacing:0.08em; text-transform:uppercase; font-weight:500; }
+.pai-verdict-v { font-size:16px; color:var(--ink); font-weight:600; letter-spacing:-0.012em; display:flex; align-items:center; gap:8px; }
+.pai-dot { width:8px; height:8px; border-radius:50%; display:inline-block; flex-shrink:0; background:var(--warn); }
+.pai-dot.ok { background:var(--ok); } .pai-dot.bad { background:var(--bad); }
+
+.pai-review-cols { display:grid; grid-template-columns:1fr 1fr; gap:16px; margin:16px 0; }
+.pai-review-col { border:1px solid var(--line); border-radius:var(--radius-md); background:var(--surface); padding:16px 18px; }
+.pai-review-h6 { margin:0 0 12px; font-family:var(--mono); font-size:10.5px; color:var(--ink-2); letter-spacing:0.08em; text-transform:uppercase; font-weight:500; display:flex; align-items:center; gap:8px; }
+.pai-review-h6::before { content:""; width:8px; height:8px; border-radius:50%; display:inline-block; flex-shrink:0; }
+.pai-review-h6.ok::before { background:var(--ok); } .pai-review-h6.fix::before { background:var(--warn); }
+.pai-review-ul { padding:0; margin:0; list-style:none; }
+.pai-review-li { padding:8px 0; border-top:1px solid var(--line); font-size:13.5px; line-height:1.5; color:var(--ink); }
+.pai-review-li:first-child { border-top:none; padding-top:0; }
+
+.pai-rail-title { font-family:var(--mono); font-size:10.5px; color:var(--ink-3); text-transform:uppercase; letter-spacing:0.1em; margin:0 0 12px; font-weight:500; }
+.pai-step-item { display:flex; align-items:center; gap:10px; padding:9px 10px; border-radius:var(--radius-md); margin-bottom:2px; }
+.pai-step-item.current { background:var(--acc-soft); }
+.pai-step-item.future { opacity:0.5; }
+.pai-step-num { width:22px; height:22px; border-radius:999px; display:inline-flex; align-items:center; justify-content:center; font-size:12px; font-weight:600; flex-shrink:0; border:1px solid var(--line-2); background:var(--surface); color:var(--ink-3); font-variant-numeric:tabular-nums; }
+.pai-step-item.done .pai-step-num { background:var(--ink); color:#fff; border-color:var(--ink); }
+.pai-step-item.current .pai-step-num { background:var(--acc); color:#fff; border-color:var(--acc); }
+.pai-step-lbl { font-size:13px; font-weight:500; color:var(--ink-2); letter-spacing:-0.008em; }
+.pai-step-item.done .pai-step-lbl { color:var(--ink); }
+.pai-step-item.current .pai-step-lbl { color:var(--ink); font-weight:600; }
+.pai-rail-foot { margin-top:20px; padding-top:16px; border-top:1px solid var(--line); font-family:var(--mono); font-size:10.5px; color:var(--ink-3); letter-spacing:0.04em; line-height:1.7; }
+
+.pai-divider { height:1px; background:var(--line); margin:40px 0 32px; }
+
+.pai-sub-head { font-size:13px; font-weight:600; color:var(--ink-2); letter-spacing:-0.005em; margin:20px 0 12px; display:flex; align-items:center; gap:8px; padding-left:10px; border-left:3px solid var(--acc); }
 </style>
 """, unsafe_allow_html=True)
 
-st.title("📋 제안서 AI 어시스턴트")
-st.caption("고객 니즈 수집 → 니즈 확인 → 모듈 선택 → 맞춤 제안서 생성")
+# ── HTML 컴포넌트 헬퍼 ──
+def _section_head(num: int, title: str, subtitle: str = "") -> str:
+    sub = f'<p class="pai-section-sub">{subtitle}</p>' if subtitle else ""
+    return f"""<div class="pai-section-head">
+  <div class="pai-section-num">{num:02d}</div>
+  <div><h2 class="pai-section-title">{title}</h2>{sub}</div>
+</div>"""
+
+def _step_collapsed(num: int, label: str, summary: str) -> str:
+    return f"""<div class="pai-step-collapsed">
+  <span class="pai-sc-n">{num:02d}</span>
+  <div>
+    <div class="pai-sc-label">{label}</div>
+    <div class="pai-sc-summary">{summary}</div>
+  </div>
+</div>"""
+
+def _needs_summary_html(nj: dict) -> str:
+    kw = "".join(f'<span class="pai-tag">{k}</span>' for k in nj.get("core_keywords", []))
+    return f"""<div class="pai-summary">
+  <div class="pai-sum-row"><span class="pai-sum-k">Pain Point</span><span class="pai-sum-v">{nj.get("pain_point","")}</span></div>
+  <div class="pai-sum-row"><span class="pai-sum-k">핵심 키워드</span><span class="pai-sum-v"><div class="pai-tag-row">{kw}</div></span></div>
+  <div class="pai-sum-row"><span class="pai-sum-k">대상</span><span class="pai-sum-v">{nj.get("target","")}</span></div>
+  <div class="pai-sum-row"><span class="pai-sum-k">산업</span><span class="pai-sum-v">{nj.get("industry","")}</span></div>
+  <div class="pai-sum-row"><span class="pai-sum-k">교육 시간</span><span class="pai-sum-v">{nj.get("duration_hours","")}H <span class="muted">/ {nj.get("preferred_style","")}</span></span></div>
+  <div class="pai-sum-row"><span class="pai-sum-k">기대 행동 변화</span><span class="pai-sum-v">{nj.get("expected_behavior", nj.get("expected_outcome",""))}</span></div>
+</div>"""
+
+def _score_panel_html(total: int, scores: list, verdict: str) -> str:
+    tone = "hi" if total >= 90 else "md" if total >= 70 else "lo"
+    bars = "".join(f"""<div class="pai-score-row">
+      <span class="pai-score-lbl">{s["label"]}</span>
+      <span class="pai-score-val">{s["score"]} / {s["max"]}</span>
+      <div class="pai-score-track"><div class="pai-score-fill" style="width:{int(s['score']/s['max']*100)}%"></div></div>
+    </div>""" for s in scores)
+    dot_cls = "ok" if total >= 90 else ("bad" if total < 60 else "")
+    return f"""<div class="pai-score-block">
+  <div>
+    <div class="pai-score-num {tone}">{total}</div>
+    <div class="pai-score-deno">/ 100 점 · 검수자 페르소나</div>
+  </div>
+  <div class="pai-score-bars">{bars}</div>
+</div>
+<div class="pai-verdict">
+  <span class="pai-verdict-k">제출 가능 여부</span>
+  <span class="pai-verdict-v"><span class="pai-dot {dot_cls}"></span>{verdict}</span>
+</div>"""
+
+def _review_cols_html(pros: list, cons: list) -> str:
+    ph = "".join(f'<li class="pai-review-li">{p}</li>' for p in pros)
+    ch = "".join(f'<li class="pai-review-li">{c}</li>' for c in cons)
+    return f"""<div class="pai-review-cols">
+  <div class="pai-review-col"><div class="pai-review-h6 ok">잘된 점</div><ul class="pai-review-ul">{ph}</ul></div>
+  <div class="pai-review-col"><div class="pai-review-h6 fix">개선 필요</div><ul class="pai-review-ul">{ch}</ul></div>
+</div>"""
+
+def _rail_html(current: int) -> str:
+    labels = ["니즈 입력","니즈 분석 확인","모듈 선택","제안서 생성","AI 검수","재생성"]
+    items = ""
+    for i, lbl in enumerate(labels):
+        n = i + 1
+        s = "done" if n < current else "current" if n == current else "future"
+        items += f'<div class="pai-step-item {s}"><span class="pai-step-num">{n:02d}</span><span class="pai-step-lbl">{lbl}</span></div>'
+    return f'<div class="pai-rail-title">제안 작성 흐름</div>{items}'
+
+def _mode_cards_html(active: str) -> str:
+    cards = [
+        ("standard","Mode 01","표준 모드","RAG 기반으로 선택된 모듈만 사용해 빠르게 커리큘럼을 조립합니다."),
+        ("advanced","Mode 02","고도화 모드","조직 맥락 · Learning Transfer · ROI 평가 섹션이 추가됩니다."),
+    ]
+    html = '<div class="pai-modes">'
+    for key, badge, title, desc in cards:
+        cls = "pai-mode active" if active == key else "pai-mode"
+        chk = '<span class="chk">✓ 선택됨</span>' if active == key else ""
+        html += f'<div class="{cls}">{chk}<h5><span class="badge">{badge}</span>{title}</h5><p>{desc}</p></div>'
+    html += "</div>"
+    return html
 
 # ── session_state 초기화 ──
 _DEFAULTS = {
@@ -1482,9 +1716,20 @@ current_step = st.session_state.workflow_step
 
 # ── 사이드바 ──
 with st.sidebar:
-    st.caption(f"🤖 모델: `{MODEL_NAME}`")
+    # ── 로고 위치 조절: margin-top 값을 바꾸면 위아래로 이동 ──
+    LOGO_MARGIN_TOP = "0px"   # ← 이 값을 바꿔서 로고 위치 조절
+    st.markdown(f"""<div class="pai-brand" style="margin-top:{LOGO_MARGIN_TOP};margin-bottom:20px;">
+  <span class="bm">P</span>proposal<span class="lt">.ai</span>
+</div>""", unsafe_allow_html=True)
+    st.markdown(_rail_html(current_step), unsafe_allow_html=True)
     st.divider()
-    if st.button("🔄 처음부터 다시 시작", use_container_width=True):
+    _key_idx = st.session_state.get("api_key_index", 0)
+    st.markdown(f"""<div class="pai-session" style="margin-bottom:8px;">
+  <span class="dot"></span>Gemini 연결됨
+</div>""", unsafe_allow_html=True)
+    st.caption(f"`{MODEL_LITE}` / `{MODEL_HEAVY}` · 키 {_key_idx + 1}/{len(_API_KEYS)}")
+    st.divider()
+    if st.button("처음부터 다시 시작", use_container_width=True):
         for _k in list(_DEFAULTS.keys()):
             if _k in st.session_state:
                 del st.session_state[_k]
@@ -1496,71 +1741,45 @@ industry     = st.session_state.get("industry", "전산업")
 target       = st.session_state.get("target", "팀장/리더급")
 duration     = st.session_state.get("duration", 8)
 
-st.divider()
-
 # ─────────────────────────────────────────────────────────
 # STEP 1 : 고객 정보 & 니즈 입력
 # ─────────────────────────────────────────────────────────
-st.subheader("1️⃣ 고객 정보 & 니즈 입력")
 
 if current_step == 1:
-    # ── 고객 기본 정보 ──
-    col_i1, col_i2, col_i3 = st.columns(3)
-    with col_i1:
-        st.selectbox(
-            "산업군",
-            ["전산업", "유통", "금융", "제조", "IT", "건설", "공공", "의료/제약", "교육", "통신/미디어", "기타"],
-            key="industry",
-        )
-    with col_i2:
-        st.selectbox(
-            "교육 대상",
-            ["팀장/리더급", "신입사원", "중간관리자", "임원", "전직급", "실무진", "기타"],
-            key="target",
-        )
-    with col_i3:
-        st.number_input(
-            "교육 시간 (H)",
-            min_value=1,
-            max_value=100,
-            step=1,
-            key="duration",
+    if not st.session_state.chatbot_started:
+        # ── 입력 화면 (챗봇 시작 전) ──
+        st.markdown(_section_head(1, "어떤 교육이 필요한가요?", "자유롭게 적어주세요. AI가 대화하며 교육 대상 · 산업 · 기간 · 실습 비중을 자동으로 수집합니다."), unsafe_allow_html=True)
+
+        initial_query_input = st.text_area(
+            "고객의 교육 니즈를 자유롭게 입력하세요",
+            height=120,
+            placeholder=(
+                "예: 우리 회사 신임 팀장들이 MZ세대 팀원들과 소통하는 데 어려움을 겪고 있어요. "
+                "특히 면담이나 피드백 상황에서 어떻게 대화해야 할지 몰라 회피하는 경향이 있습니다. "
+                "실습 위주로 실제 현장에서 바로 쓸 수 있는 스킬을 익히길 원합니다."
+            ),
+            key="initial_query_input"
         )
 
-    # 세션 상태 반영 (로컬 변수 갱신)
-    company_name = st.session_state.get("company_name", "")
-    industry     = st.session_state.get("industry", "전산업")
-    target       = st.session_state.get("target", "팀장/리더급")
-    duration     = st.session_state.get("duration", 8)
-
-    initial_query_input = st.text_area(
-        "고객의 교육 니즈를 자유롭게 입력하세요",
-        height=120,
-        placeholder=(
-            "예: 우리 회사 신임 팀장들이 MZ세대 팀원들과 소통하는 데 어려움을 겪고 있어요. "
-            "특히 면담이나 피드백 상황에서 어떻게 대화해야 할지 몰라 회피하는 경향이 있습니다. "
-            "실습 위주로 실제 현장에서 바로 쓸 수 있는 스킬을 익히길 원합니다."
-        ),
-        key="initial_query_input"
-    )
-
-    # 텍스트 변경 시 chatbot 상태 초기화 (자동 진행 없음)
-    if initial_query_input and initial_query_input != st.session_state.initial_query:
-        st.session_state.initial_query = initial_query_input
-        st.session_state.needs_conversation = []
-        st.session_state.needs_complete = False
-        st.session_state.chatbot_started = False
-
-    # [Sprint 1-1] 명시적 트리거 버튼 — 클릭 전까지 챗봇 비활성
-    if initial_query_input and not st.session_state.chatbot_started:
-        if st.button("🚀 니즈 분석 시작", type="primary", use_container_width=True, key="start_chatbot"):
+        if initial_query_input and initial_query_input != st.session_state.initial_query:
             st.session_state.initial_query = initial_query_input
-            st.session_state.chatbot_started = True
-            st.rerun()
+            st.session_state.needs_conversation = []
+            st.session_state.needs_complete = False
 
-    if st.session_state.initial_query and st.session_state.chatbot_started:
-        st.divider()
-        st.subheader("🤖 추가 정보 수집")
+        if initial_query_input:
+            if st.button("AI 검수 시작 (니즈 분석 진행) →", type="primary", use_container_width=True, key="start_chatbot"):
+                st.session_state.initial_query = initial_query_input
+                st.session_state.chatbot_started = True
+                st.rerun()
+
+    else:
+        # ── 챗봇 진행 중 — 초기 입력은 접어서 표시 ──
+        _q = str(st.session_state.initial_query or "")
+        st.markdown(
+            _step_collapsed(1, "Step 01 · 니즈 입력", _q[:90] + ("…" if len(_q) > 90 else "")),
+            unsafe_allow_html=True
+        )
+        st.markdown('<div class="pai-sub-head">추가 정보 수집</div>', unsafe_allow_html=True)
 
         full_conv_text = st.session_state.initial_query + " " + " ".join(
             m.get("content", "") for m in st.session_state.needs_conversation if m.get("role") == "user"
@@ -1582,15 +1801,15 @@ if current_step == 1:
 
         # 정보 완성도 표시
         completeness = check_info_completeness(full_conv_text)
-        c1, c2, c3, c4 = st.columns(4)
-        with c1:
-            st.metric("📍 교육 인원", "✅" if completeness.get("교육인원") else "⏳")
-        with c2:
-            st.metric("🎯 Pain Point", "✅" if completeness.get("pain_point") else "⏳")
-        with c3:
-            st.metric("📚 실습 비중", "✅" if completeness.get("실습비중") else "⏳")
-        with c4:
-            st.metric("📖 기존 시도", "✅" if completeness.get("기존시도") else "⏳ (선택)")
+        filled = sum([completeness.get("교육인원",False), completeness.get("pain_point",False), completeness.get("실습비중",False)])
+        def _chk(v): return "✅" if v else "—"
+        st.markdown(f"""<div style="display:flex;gap:8px;margin:12px 0;flex-wrap:wrap;">
+          <span class="pai-tag">교육 인원 {_chk(completeness.get('교육인원'))}</span>
+          <span class="pai-tag">Pain Point {_chk(completeness.get('pain_point'))}</span>
+          <span class="pai-tag">실습 비중 {_chk(completeness.get('실습비중'))}</span>
+          <span class="pai-tag" style="color:var(--ink-3)">기존 시도 {_chk(completeness.get('기존시도'))} (선택)</span>
+          <span class="pai-tag" style="color:var(--acc);border-color:var(--acc);">수집됨 {filled} / 3</span>
+        </div>""", unsafe_allow_html=True)
 
         # 사용자 추가 답변 입력
         user_chat_in = st.chat_input("답변을 입력하세요...", key="needs_chat_input")
@@ -1606,14 +1825,14 @@ if current_step == 1:
                 st.session_state.needs_conversation.append({"role": "assistant", "content": nq})
             st.rerun()
 
-        st.divider()
+        st.markdown('<div class="pai-divider"></div>', unsafe_allow_html=True)
 
         needs_ok = is_needs_complete(full_conv_text)
         if not needs_ok:
-            st.info("💡 필수 정보(교육인원, Pain Point, 실습비중) 중 최소 2가지 이상 입력하면 다음 단계로 진행할 수 있습니다.")
+            st.info("필수 정보(교육인원, Pain Point, 실습비중) 중 최소 2가지 이상 입력하면 다음 단계로 진행할 수 있습니다.")
 
         if st.button(
-            "✅ 충분합니다 — 니즈 분석으로",
+            "니즈 분석 진행 →",
             type="primary",
             use_container_width=True,
             disabled=not needs_ok,
@@ -1629,13 +1848,13 @@ if current_step == 1:
             st.rerun()
 
 else:
-    # Step 1 완료 요약 — 위젯 키는 step>1에서 초기화되므로 needs_json에서 읽음
     _nj  = st.session_state.get("needs_json") or {}
     _ind = _nj.get("industry") or st.session_state.get("industry", "")
     _tgt = _nj.get("target")   or st.session_state.get("target", "")
     _dur = _nj.get("duration_hours") or st.session_state.get("duration", 8)
+    _q   = str(st.session_state.initial_query or "")
     st.markdown(
-        f'<div class="step-done">✅ {_ind} | {_tgt} | {_dur}H | {str(st.session_state.initial_query or "")[:60]}…</div>',
+        _step_collapsed(1, "Step 01 · 니즈 입력", f"{_ind} | {_tgt} | {_dur}H | {_q[:80]}{'…' if len(_q)>80 else ''}"),
         unsafe_allow_html=True
     )
 
@@ -1643,21 +1862,14 @@ else:
 # STEP 2 : 니즈 분석 결과 확인
 # ─────────────────────────────────────────────────────────
 if current_step >= 2 and st.session_state.needs_json:
-    st.divider()
-    st.subheader("2️⃣ 니즈 분석 결과 확인")
+    st.markdown('<div class="pai-divider"></div>', unsafe_allow_html=True)
+    st.markdown(_section_head(2, "추출된 니즈를 검토하세요.", "AI가 대화에서 추론한 항목입니다. 부정확하면 1단계로 돌아가 수정할 수 있습니다."), unsafe_allow_html=True)
 
     nj = st.session_state.needs_json
-    st.markdown(f"""
-<div class="needs-box">
-<b>핵심 키워드:</b> {', '.join(nj.get('core_keywords', []))}<br>
-<b>문제점 (Pain Point):</b> {nj.get('pain_point', '')}<br>
-<b>기대 행동 변화:</b> {nj.get('expected_behavior', '')}<br>
-<b>학습 수준:</b> {nj.get('learning_level', '')} &nbsp;|&nbsp; <b>선호 방식:</b> {nj.get('preferred_style', '')}
-</div>
-""", unsafe_allow_html=True)
+    st.markdown(_needs_summary_html(nj), unsafe_allow_html=True)
 
     if current_step == 2:
-        st.caption("위 분석 결과가 맞으면 다음 단계로 진행하세요. 다르면 처음으로 돌아가 수정하세요.")
+        st.caption("위 분석 결과가 맞으면 다음 단계로 진행하세요.")
 
         col_ok, col_back = st.columns([3, 1])
         with col_ok:
@@ -1684,14 +1896,15 @@ if current_step >= 2 and st.session_state.needs_json:
                         st.stop()
 
         with col_back:
-            if st.button("✏️ 다시 입력", use_container_width=True, key="step2_back"):
+            if st.button("다시 입력", use_container_width=True, key="step2_back"):
                 st.session_state.workflow_step = 1
                 st.session_state.needs_json = None
                 st.rerun()
 
     else:
+        kw_str = ", ".join(nj.get("core_keywords", []))
         st.markdown(
-            f'<div class="step-done">✅ 분석 확인 완료 | 키워드: {", ".join(nj.get("core_keywords", []))}</div>',
+            _step_collapsed(2, "Step 02 · 니즈 분석", f"{nj.get('target','')} · {nj.get('industry','')} · {nj.get('duration_hours','')}H | {kw_str}"),
             unsafe_allow_html=True
         )
 
@@ -1699,20 +1912,17 @@ if current_step >= 2 and st.session_state.needs_json:
 # STEP 3 : 모듈 선택
 # ─────────────────────────────────────────────────────────
 if current_step >= 3 and st.session_state.retrieved_modules:
-    st.divider()
-    st.subheader("3️⃣ 교육 모듈 선택")
+    st.markdown('<div class="pai-divider"></div>', unsafe_allow_html=True)
+    st.markdown(_section_head(3, "커리큘럼에 포함할 모듈을 선택하세요.", f"{len(st.session_state.retrieved_modules)}개 모듈 DB에서 검색된 결과입니다. 선택하지 않으면 AI가 자동으로 조립합니다."), unsafe_allow_html=True)
 
     r_mods = st.session_state.retrieved_modules
 
     if current_step == 3:
         col_caption, col_back = st.columns([5, 2])
         with col_caption:
-            st.caption(
-                "검색된 모듈 중 커리큘럼에 포함할 모듈을 선택하세요. "
-                "선택하지 않으면 AI가 자동으로 최적 모듈을 선택합니다."
-            )
+            st.caption("선택하지 않으면 AI가 자동으로 최적 모듈을 조합합니다.")
         with col_back:
-            if st.button("🔄 니즈 다시 고도화하기", use_container_width=True, key="back_to_needs"):
+            if st.button("← 니즈 다시 입력", use_container_width=True, key="back_to_needs"):
                 st.session_state.workflow_step = 1
                 st.session_state.retrieved_modules = []
                 st.session_state.retrieved_modules_json = None
@@ -1721,9 +1931,7 @@ if current_step >= 3 and st.session_state.retrieved_modules:
                 st.session_state.ab_cot = None
                 st.rerun()
 
-        type_label = {"intro": "🔵 도입", "core": "🟢 핵심", "apply": "🟡 현업적용"}
-
-        # [로드맵] 유사도 → 별점 변환
+        # 유사도 → 별점
         def sim_to_stars(s):
             if s >= 90: return "⭐⭐⭐⭐⭐"
             elif s >= 80: return "⭐⭐⭐⭐"
@@ -1731,39 +1939,62 @@ if current_step >= 3 and st.session_state.retrieved_modules:
             elif s >= 60: return "⭐⭐"
             return "⭐"
 
-        for i, mod in enumerate(r_mods):
-            mod_name   = mod.get("모듈명", f"모듈 {i+1}")
-            course     = mod.get("과정명", "")
-            sim        = mod.get("similarity_percent", 0)
-            topics     = mod.get("교육목표", "")
-            content    = mod.get("내용_원문", "")
-            rec_time   = mod.get("권장시간", "")
-            edu_type   = mod.get("교육방식", "")
-            stars      = sim_to_stars(sim)
+        type_label = {"intro": "도입", "core": "핵심", "apply": "현업적용"}
 
+        sel_idx_cur = [i for i in range(len(r_mods)) if st.session_state.get(f"mod_sel_{i}", False)]
+        st.markdown(f"""<div class="pai-info-head">
+          <div class="pai-info-count"><em>{len(sel_idx_cur)}</em> / {len(r_mods)}개 모듈 선택됨</div>
+          <span class="pai-info-sort">유사도 기준 정렬</span>
+        </div>""", unsafe_allow_html=True)
+
+        for i, mod in enumerate(r_mods):
+            mod_name      = mod.get("모듈명", f"모듈 {i+1}")
+            course        = mod.get("과정명", "")
+            sim           = mod.get("similarity_percent", 0)
+            content       = mod.get("내용_원문", "")
+            rec_time      = mod.get("권장시간", "")
             target_tags   = mod.get("추천타겟", [])
             industry_tags = mod.get("관련산업", [])
+            objective     = mod.get("교육목표", "")
+            method        = mod.get("교육방식", "")
+            mod_type      = mod.get("모듈성격", "")
+            stars         = sim_to_stars(sim)
+            type_str      = type_label.get(mod_type, "")
+
+            # 태그 HTML (추천타겟 + 관련산업)
+            tag_parts = []
+            if type_str:
+                tag_parts.append(f'<span class="pai-tag" style="color:var(--ink-2);">{type_str}</span>')
+            for t in target_tags:
+                tag_parts.append(f'<span class="pai-ttag">{t}</span>')
+            for ind in industry_tags:
+                tag_parts.append(f'<span class="pai-itag">{ind}</span>')
+            if tag_parts:
+                st.markdown(
+                    f'<div style="display:flex;flex-wrap:wrap;gap:5px;margin-bottom:4px;">{"".join(tag_parts)}</div>',
+                    unsafe_allow_html=True
+                )
 
             col_chk, col_info = st.columns([1, 11])
             with col_chk:
                 st.checkbox("선택", key=f"mod_sel_{i}", label_visibility="collapsed")
             with col_info:
-                if target_tags or industry_tags:
-                    tag_html = '<div style="margin-bottom:4px;display:flex;flex-wrap:wrap;gap:5px;">'
-                    for t in target_tags:
-                        tag_html += f'<span style="background:#e8f4f8;color:#1a6b9e;padding:2px 9px;border-radius:10px;font-size:0.76rem;border:1px solid #b8d9ee;">👤 {t}</span>'
-                    for ind in industry_tags:
-                        tag_html += f'<span style="background:#f0f8e8;color:#2d6a1e;padding:2px 9px;border-radius:10px;font-size:0.76rem;border:1px solid #b8d9b8;">🏢 {ind}</span>'
-                    tag_html += '</div>'
-                    st.markdown(tag_html, unsafe_allow_html=True)
-                with st.expander(
-                    f"**{mod_name}** | {course} | {rec_time} | {stars} ({sim}%)"
-                ):
+                meta_parts = []
+                if course:   meta_parts.append(course)
+                if rec_time: meta_parts.append(rec_time)
+                if method:   meta_parts.append(method)
+                meta_str = "  ·  ".join(meta_parts)
+                expander_label = f"**{i+1:02d} · {mod_name}**  |  {meta_str}  |  {stars} ({sim}%)"
+                with st.expander(expander_label):
+                    if objective:
+                        st.markdown(f"**교육목표:** {objective}")
                     if content:
+                        st.markdown("**주요 내용:**")
                         for ln in content.split("\n"):
                             if ln.strip():
                                 st.markdown(f"- {ln.strip()}")
-            st.markdown("---")
+
+            st.markdown('<div style="height:1px;background:var(--line);margin:2px 0 6px;"></div>', unsafe_allow_html=True)
 
         # 선택 현황 요약
         sel_idx = [i for i in range(len(r_mods)) if st.session_state.get(f"mod_sel_{i}", False)]
@@ -1773,15 +2004,15 @@ if current_step >= 3 and st.session_state.retrieved_modules:
             sel_names = [r_mods[i].get("모듈명", f"모듈 {i+1}") for i in sel_idx]
             st.success(f"✅ {len(sel_idx)}개 선택됨: {', '.join(sel_names)}")
 
-        st.divider()
+        st.markdown('<div class="pai-divider"></div>', unsafe_allow_html=True)
 
-        # ── [Sprint 2-1] 투트랙 선택 UI ──
-        st.markdown("#### 🎯 제안서 생성 방식 선택")
+        # ── 생성 방식 선택 ──
+        st.markdown('<div class="pai-sub-head">제안서 생성 방식</div>', unsafe_allow_html=True)
         col_std, col_adv = st.columns(2)
         with col_std:
             std_selected = st.session_state.generation_track == "standard"
             if st.button(
-                "📄 표준 (Standard)\n빠른 뼈대 제안서 (~1분)",
+                "📄 표준 모드  ·  빠른 뼈대 제안서",
                 use_container_width=True,
                 type="primary" if std_selected else "secondary",
                 key="track_standard"
@@ -1791,7 +2022,7 @@ if current_step >= 3 and st.session_state.retrieved_modules:
         with col_adv:
             adv_selected = st.session_state.generation_track == "advanced"
             if st.button(
-                "🔬 고도화 (Advanced)\n맞춤형 심층 제안서 (~3분)",
+                "🔬 고도화 모드  ·  심층 맞춤 제안서",
                 use_container_width=True,
                 type="primary" if adv_selected else "secondary",
                 key="track_advanced"
@@ -1799,19 +2030,18 @@ if current_step >= 3 and st.session_state.retrieved_modules:
                 st.session_state.generation_track = "advanced"
                 st.rerun()
 
-        # 현재 선택 트랙 안내
         if st.session_state.generation_track == "standard":
-            st.caption("✅ **표준 모드**: RAG 기반 커리큘럼을 빠르게 생성합니다.")
+            st.caption("표준 모드: RAG 기반 커리큘럼을 빠르게 생성합니다.")
         else:
-            st.caption("✅ **고도화 모드**: 조직 맥락 + Learning Transfer + ROI 평가 섹션이 추가됩니다.")
+            st.caption("고도화 모드: 조직 맥락 + Learning Transfer + ROI 평가 섹션이 추가됩니다.")
 
-        # [Sprint 2-1] 고도화 모드 추가 입력 필드
+        # 고도화 모드 추가 입력
         if st.session_state.generation_track == "advanced":
-            with st.expander("📋 고도화 추가 정보 입력 (선택)", expanded=True):
-                adv_status   = st.text_area("1️⃣ 교육 대상 현황", placeholder="예: 팀장 승진 후 평균 6개월 이내, 실무자 출신으로 리더십 경험 부족", height=80, key="adv_status")
-                adv_culture  = st.text_area("2️⃣ 조직 문화 / 특이사항", placeholder="예: 수평적 문화 지향, 최근 조직 개편으로 팀 갈등 높음", height=80, key="adv_culture")
-                adv_change   = st.text_area("3️⃣ 기대하는 변화 (구체적)", placeholder="예: 교육 3개월 후 팀원 만족도 10% 향상, 이직률 감소", height=80, key="adv_change")
-                adv_special  = st.text_area("4️⃣ 특별 요청 사항", placeholder="예: 경쟁사 사례 배제, 특정 강사 선호, 외부 강사 불가", height=80, key="adv_special")
+            with st.expander("고도화 추가 정보 입력 (선택)", expanded=True):
+                adv_status   = st.text_area("교육 대상 현황", placeholder="예: 팀장 승진 후 평균 6개월 이내, 실무자 출신으로 리더십 경험 부족", height=80, key="adv_status")
+                adv_culture  = st.text_area("조직 문화 / 특이사항", placeholder="예: 수평적 문화 지향, 최근 조직 개편으로 팀 갈등 높음", height=80, key="adv_culture")
+                adv_change   = st.text_area("기대하는 변화 (구체적)", placeholder="예: 교육 3개월 후 팀원 만족도 10% 향상, 이직률 감소", height=80, key="adv_change")
+                adv_special  = st.text_area("특별 요청 사항", placeholder="예: 경쟁사 사례 배제, 특정 강사 선호, 외부 강사 불가", height=80, key="adv_special")
                 st.session_state.advanced_context = {
                     "교육대상현황": adv_status,
                     "조직문화": adv_culture,
@@ -1872,21 +2102,14 @@ if current_step >= 3 and st.session_state.retrieved_modules:
                     st.rerun()
             with col_gen:
                 if st.button("🔀 A·B안 통합 최선 제안서 생성", type="primary", use_container_width=True, key="step3_generate"):
-                    _prog = st.progress(0, text="🔀 A·B안 비교 분석 중...")
-                    _prog.progress(30, text="✍️ 최선 요소 통합 중...")
-
-                    proposal, timing_result = combine_ab_proposals(
-                        st.session_state.ab_draft_a,
-                        st.session_state.ab_draft_b,
-                        st.session_state.ab_feedback,
-                        st.session_state.needs_json,
-                        duration,
-                    )
-
-                    _prog.progress(90, text="🔍 품질 검증 중...")
-                    _prog.progress(100, text="✅ 완료!")
-                    time.sleep(0.3)
-                    _prog.empty()
+                    with st.spinner("A·B안을 비교하고 최선 요소를 통합하는 중..."):
+                        proposal, timing_result = combine_ab_proposals(
+                            st.session_state.ab_draft_a,
+                            st.session_state.ab_draft_b,
+                            st.session_state.ab_feedback,
+                            st.session_state.needs_json,
+                            duration,
+                        )
 
                     proposal = re.sub(r'<br\s*/?>', '\n- ', proposal)
                     proposal = re.sub(r'<[^>]+>', '', proposal)
@@ -1900,25 +2123,20 @@ if current_step >= 3 and st.session_state.retrieved_modules:
 
     else:
         sel_idx_done = st.session_state.selected_modules
+        track_label = "표준" if st.session_state.generation_track == "standard" else "고도화"
         if not sel_idx_done:
-            st.markdown('<div class="step-done">✅ 모듈 선택: AI 자동 선택 모드로 진행</div>', unsafe_allow_html=True)
+            st.markdown(_step_collapsed(3, "Step 03 · 모듈 선택", f"AI 자동 선택 · {track_label} 모드"), unsafe_allow_html=True)
         else:
-            done_names = [
-                r_mods[i].get("모듈명", f"모듈 {i+1}")
-                for i in sel_idx_done if i < len(r_mods)
-            ]
+            done_names = [r_mods[i].get("모듈명", f"모듈 {i+1}") for i in sel_idx_done if i < len(r_mods)]
             preview = ", ".join(done_names[:3]) + ("…" if len(done_names) > 3 else "")
-            st.markdown(
-                f'<div class="step-done">✅ {len(sel_idx_done)}개 모듈 선택됨: {preview}</div>',
-                unsafe_allow_html=True
-            )
+            st.markdown(_step_collapsed(3, "Step 03 · 모듈 선택", f"{len(sel_idx_done)}개 모듈 · {track_label} 모드 | {preview}"), unsafe_allow_html=True)
 
 # ─────────────────────────────────────────────────────────
 # STEP 4 : 생성된 제안서
 # ─────────────────────────────────────────────────────────
 if current_step >= 4 and st.session_state.proposal:
-    st.divider()
-    st.subheader("4️⃣ 생성된 제안서")
+    st.markdown('<div class="pai-divider"></div>', unsafe_allow_html=True)
+    st.markdown(_section_head(4, "맞춤 제안서가 완성됐습니다.", "A안 · B안 초안을 비교한 뒤 최적 통합본을 확인하세요."), unsafe_allow_html=True)
 
     proposal      = st.session_state.proposal
     nj            = st.session_state.needs_json or {}
@@ -1926,11 +2144,23 @@ if current_step >= 4 and st.session_state.proposal:
     rem_ph        = st.session_state.remaining_placeholders or []
     keyword       = nj.get("core_keywords", ["제안서"])[0]
 
-    # ── [P2] 클라이언트 제출용 (깔끔한 버전 — 내부 QA 정보 미포함) ──
-    st.markdown(proposal)
-    st.divider()
+    # 제안서 메타 바
+    _sel_cnt = len(st.session_state.selected_modules) or len(st.session_state.retrieved_modules)
+    _tgt  = nj.get("target", "")
+    _dur  = nj.get("duration_hours", duration)
+    _sty  = nj.get("preferred_style", "혼합형")
+    _trk  = "표준" if st.session_state.generation_track == "standard" else "고도화"
+    st.markdown(f"""<div class="pai-meta-bar">
+      <div><div class="pai-meta-k">대상</div><div class="pai-meta-v">{_tgt}</div></div>
+      <div><div class="pai-meta-k">기간</div><div class="pai-meta-v">{_dur}H</div></div>
+      <div><div class="pai-meta-k">방식</div><div class="pai-meta-v">{_sty} <span class="m">· {_trk}</span></div></div>
+      <div><div class="pai-meta-k">사용 모듈</div><div class="pai-meta-v">{_sel_cnt}<span class="m"> 개</span></div></div>
+    </div>""", unsafe_allow_html=True)
 
-    st.markdown("**📥 제출용 버전 다운로드**")
+    st.markdown(proposal)
+    st.markdown('<div class="pai-divider"></div>', unsafe_allow_html=True)
+
+    st.markdown('<div style="font-size:12.5px;font-weight:600;color:var(--ink);margin-bottom:8px;">제출용 버전 다운로드</div>', unsafe_allow_html=True)
     try:
         docx_bytes = markdown_to_docx(proposal)
         docx_ok = True
@@ -2025,11 +2255,11 @@ if current_step >= 4 and st.session_state.proposal:
         )
 
     # ── STEP 5 : AI 검수 ──
-    st.divider()
-    st.subheader("5️⃣ AI 검수 (검수자 페르소나)")
+    st.markdown('<div class="pai-divider"></div>', unsafe_allow_html=True)
+    st.markdown(_section_head(5, "검수자 페르소나의 평가입니다.", "시니어 HRD 컨설턴트 관점에서 4가지 기준으로 점수화했습니다."), unsafe_allow_html=True)
 
-    if st.button("🔍 AI 검수 시작", use_container_width=True, key="review_btn"):
-        with st.spinner("📋 시니어 HRD 컨설턴트가 제안서를 검토 중..."):
+    if st.button("AI 검수 시작 →", type="primary", use_container_width=False, key="review_btn"):
+        with st.spinner("시니어 HRD 컨설턴트가 제안서를 검토 중..."):
             review = review_proposal(
                 st.session_state.improved_proposal or proposal,
                 nj
@@ -2040,57 +2270,29 @@ if current_step >= 4 and st.session_state.proposal:
         review = st.session_state.review
 
         if review.get("제출_가능_여부") == "오류":
-            st.error(f"❌ AI 검수 중 오류가 발생했습니다: {review.get('개선_지시문', '')}")
-            st.caption("'🔍 AI 검수 시작' 버튼을 다시 눌러 재시도하거나, 아래 6단계에서 직접 피드백을 입력해 재작성할 수 있습니다.")
+            st.error(f"AI 검수 중 오류가 발생했습니다: {review.get('개선_지시문', '')}")
+            st.caption("'AI 검수 시작' 버튼을 다시 눌러 재시도하거나, 아래 6단계에서 직접 피드백을 입력해 재작성할 수 있습니다.")
         else:
-            total  = review.get("총점", 0)
+            total   = review.get("총점", 0)
+            verdict = review.get("제출_가능_여부", "")
+            scores_raw  = review.get("항목별_점수", {})
+            max_map = {"니즈_적합성": 25, "커리큘럼_완성도": 35, "전문성_표현": 25, "제출_가능성": 15}
+            score_list = [{"label": k, "score": v, "max": max_map.get(k, 25)} for k, v in scores_raw.items()]
 
-            score_color  = "#16a34a" if total >= 80 else "#d97706" if total >= 60 else "#dc2626"
-            verdict      = review.get("제출_가능_여부", "")
-            verdict_icon = "✅" if "즉시" in verdict else "⚠️" if "수정" in verdict else "❌"
-
-            col_sc, col_detail = st.columns([1, 2])
-            with col_sc:
-                st.markdown(f"""
-<div style="text-align:center; padding:20px; background:#f9fafb;
-            border-radius:12px; border: 2px solid {score_color}">
-<div style="font-size:3em; font-weight:bold; color:{score_color}">{total}</div>
-<div style="color:#6b7280">/ 100점</div>
-</div>""", unsafe_allow_html=True)
-
-            with col_detail:
-                scores  = review.get("항목별_점수", {})
-                max_map = {"니즈_적합성": 25, "커리큘럼_완성도": 35, "전문성_표현": 25, "제출_가능성": 15}
-                for k, v in scores.items():
-                    ms = max_map.get(k, 25)
-                    st.markdown(f"**{k}** {v}/{ms}점")
-                    st.progress(int(v / ms * 100) / 100)
-
-            st.markdown(f"**{verdict_icon} 제출 가능 여부:** {verdict}")
-            st.divider()
-
-            col_good, col_bad = st.columns(2)
-            with col_good:
-                st.markdown("**✅ 잘된 점**")
-                for item in review.get("잘된_점", []):
-                    st.markdown(f"- {item}")
-            with col_bad:
-                st.markdown("**🔧 개선 필요**")
-                for item in review.get("개선_필요", []):
-                    st.markdown(f"- {item}")
+            st.markdown(_score_panel_html(total, score_list, verdict), unsafe_allow_html=True)
+            st.markdown(_review_cols_html(review.get("잘된_점", []), review.get("개선_필요", [])), unsafe_allow_html=True)
 
             if review.get("즉시_수정_필요"):
-                st.warning("**⚠️ 즉시 수정 필수**\n" +
-                           "\n".join(f"- {i}" for i in review["즉시_수정_필요"]))
+                st.warning("즉시 수정 필수\n" + "\n".join(f"- {i}" for i in review["즉시_수정_필요"]))
 
-            st.info(f"**📌 검수자 개선 지시문:**\n{review.get('개선_지시문', '')}")
+            st.info(f"검수자 개선 지시문:\n{review.get('개선_지시문', '')}")
 
     # ── STEP 6 : 피드백 반영 재생성 ──
-    st.divider()
-    st.subheader("6️⃣ 피드백 반영 재생성")
+    st.markdown('<div class="pai-divider"></div>', unsafe_allow_html=True)
+    st.markdown(_section_head(6, "피드백을 반영해 재생성하세요.", "검수 의견을 그대로 반영하거나, 추가 수정 요청을 자유롭게 입력할 수 있습니다."), unsafe_allow_html=True)
 
     user_opinion = st.text_area(
-        "✏️ 수정 요청 작성 (선택)",
+        "추가 수정 요청 — 선택",
         placeholder="예: 3모듈의 실습 시간을 늘려주세요. 사례 연구를 금융권 중심으로 바꿔주세요.\n비워두면 위 AI 검수 결과를 기반으로 재작성합니다.",
         height=100,
         key="user_opinion_input"
@@ -2103,7 +2305,7 @@ if current_step >= 4 and st.session_state.proposal:
     _can_rewrite = bool(user_opinion.strip()) or _has_valid_review
 
     if not _can_rewrite:
-        st.caption("💡 수정 요청을 입력하거나, 먼저 'AI 검수 시작'을 실행하세요.")
+        st.caption("수정 요청을 입력하거나, 먼저 'AI 검수 시작'을 실행하세요.")
 
     if st.button(
         "🔄 제안서 재작성",
@@ -2115,23 +2317,19 @@ if current_step >= 4 and st.session_state.proposal:
             st.session_state.review if _has_valid_review
             else {"개선_지시문": "", "개선_필요": [], "즉시_수정_필요": []}
         )
-        _prog6 = st.progress(0, text="💭 피드백 분석 및 변경 계획 수립 중...")
-        cot_result, improved = improve_proposal(
-            st.session_state.improved_proposal or proposal,
-            _review_for_improve,
-            nj,
-            duration,
-            user_opinion=user_opinion,
-            retrieved_modules_json=st.session_state.retrieved_modules_json,
-            grouped_modules=st.session_state.grouped,
-        )
-        _prog6.progress(80, text="✍️ 변경 계획 기반 제안서 재작성 중...")
+        with st.spinner("피드백을 분석하고 제안서를 재작성하는 중..."):
+            cot_result, improved = improve_proposal(
+                st.session_state.improved_proposal or proposal,
+                _review_for_improve,
+                nj,
+                duration,
+                user_opinion=user_opinion,
+                retrieved_modules_json=st.session_state.retrieved_modules_json,
+                grouped_modules=st.session_state.grouped,
+            )
         improved = re.sub(r'<br\s*/?>', '\n- ', improved)
         improved = re.sub(r'<[^>]+>', '', improved)
         improved, _ = replace_placeholders(improved, company_name)
-        _prog6.progress(100, text="✅ 완료!")
-        time.sleep(0.3)
-        _prog6.empty()
         st.session_state.improve_cot = cot_result
         st.session_state.improved_proposal = improved
 
@@ -2171,7 +2369,7 @@ if current_step >= 4 and st.session_state.proposal:
         except Exception:
             pass
 
-        st.caption("💡 '🔍 AI 검수 시작' 버튼을 다시 누르면 재작성본을 검수합니다.")
+        st.caption("'AI 검수 시작' 버튼을 다시 누르면 재작성본을 검수합니다.")
 
-st.divider()
-st.caption("💡 Powered by KPH")
+st.markdown('<div class="pai-divider"></div>', unsafe_allow_html=True)
+st.markdown('<div style="font-family:var(--mono);font-size:10.5px;color:var(--ink-3);letter-spacing:0.06em;">Powered by KPH · proposal.ai</div>', unsafe_allow_html=True)
